@@ -1267,6 +1267,8 @@ struct AudioFilesView: View {
     @State private var newAlbumName = ""
     @State private var showSettings = false
     @State private var searchText = ""
+    /// 当前选中的标签筛选（nil 表示不筛）。
+    @State private var selectedTag: String?
     @State private var renameAlbumTarget: Album?
     @State private var renameText = ""
     @State private var showRenameAlbum = false
@@ -1299,6 +1301,16 @@ struct AudioFilesView: View {
 
                 if libraryMode == .albums {
                     searchBar
+                    tagFilterBar
+                        .onChange(of: albumStore.albums) { _, _ in
+                            // 选中的标签可能因编辑/删除专辑而不再存在，否则会一直筛出空列表。
+                            if let selectedTag,
+                               !albumStore.allTags().contains(where: {
+                                   $0.caseInsensitiveCompare(selectedTag) == .orderedSame
+                               }) {
+                                self.selectedTag = nil
+                            }
+                        }
                 }
 
                 switch libraryMode {
@@ -1396,10 +1408,48 @@ struct AudioFilesView: View {
     }
 
     private var filteredAlbums: [Album] {
-        guard !searchText.isEmpty else { return albumStore.albums }
+        var result = albumStore.albums
+        // 标签筛选与关键词是「与」关系：先按选中的标签收窄，再在结果里搜。
+        if let selectedTag {
+            result = result.filter { album in
+                album.tagList.contains { $0.caseInsensitiveCompare(selectedTag) == .orderedSame }
+            }
+        }
+        guard !searchText.isEmpty else { return result }
         // 搜名称 + 备注 + 标签：收藏多的时候常靠社团名/声优/标签找，光搜名称不够。
-        return albumStore.albums.filter {
+        return result.filter {
             $0.searchableText.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    /// 标签筛选条：库里有标签时显示，可横向滚动，点一下切换选中。
+    @ViewBuilder
+    private var tagFilterBar: some View {
+        let tags = albumStore.allTags()
+        if !tags.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(tags, id: \.self) { tag in
+                        let isSelected = selectedTag?.caseInsensitiveCompare(tag) == .orderedSame
+                        Button {
+                            selectedTag = isSelected ? nil : tag
+                        } label: {
+                            Text("#\(tag)")
+                                .font(.caption)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(
+                                    isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.thinMaterial),
+                                    in: Capsule()
+                                )
+                                .foregroundStyle(isSelected ? .white : .primary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal)
+            }
+            .padding(.bottom, 4)
         }
     }
 
@@ -1428,13 +1478,16 @@ struct AudioFilesView: View {
     @ViewBuilder
     private var albumsList: some View {
         let albums = filteredAlbums
-        // 「未分类」虚拟专辑：把不在任何专辑里的音频聚在一起，方便浏览与播放。搜索专辑时不显示。
-        let uncategorized = searchText.isEmpty ? albumStore.uncategorizedURLs() : []
+        let isFiltering = !searchText.isEmpty || selectedTag != nil
+        // 「未分类」虚拟专辑：把不在任何专辑里的音频聚在一起。筛选时不显示（它没有标签也没名字可搜）。
+        let uncategorized = isFiltering ? [] : albumStore.uncategorizedURLs()
         if albums.isEmpty && uncategorized.isEmpty {
             ContentUnavailableView(
-                searchText.isEmpty ? "还没有专辑" : "无匹配结果",
-                systemImage: "square.stack",
-                description: Text(searchText.isEmpty ? "点右上角 + 新建专辑，再往里添加歌曲" : "换个关键词试试")
+                isFiltering ? "无匹配结果" : "还没有专辑",
+                systemImage: isFiltering ? "magnifyingglass" : "square.stack",
+                description: Text(isFiltering
+                    ? "换个关键词或标签试试"
+                    : "点右上角 + 新建专辑，再往里添加歌曲")
             )
         } else {
             List {
