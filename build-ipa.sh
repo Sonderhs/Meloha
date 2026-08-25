@@ -10,7 +10,8 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCHEME="SubtitlePlayer"
 PROJECT="$PROJECT_DIR/SubtitlePlayer.xcodeproj"
 BUILD_DIR="$PROJECT_DIR/.build_ipa"
-OUTPUT="$HOME/Desktop/Meloha.ipa"
+DIST_DIR="$PROJECT_DIR/../dist"
+OUTPUT="$DIST_DIR/Meloha.ipa"
 
 echo "▶︎ 清理并编译真机 Release 版本（未签名）…"
 xcodebuild \
@@ -19,6 +20,8 @@ xcodebuild \
   -configuration Release \
   -sdk iphoneos \
   -derivedDataPath "$BUILD_DIR" \
+  -skipPackagePluginValidation \
+  -skipMacroValidation \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
   clean build
 
@@ -29,6 +32,7 @@ if [ -z "$APP" ]; then
 fi
 
 echo "▶︎ 打包 IPA（来自 $(basename "$APP")）…"
+mkdir -p "$DIST_DIR"
 rm -rf "$BUILD_DIR/ipa" "$OUTPUT"
 mkdir -p "$BUILD_DIR/ipa/Payload"
 cp -R "$APP" "$BUILD_DIR/ipa/Payload/"

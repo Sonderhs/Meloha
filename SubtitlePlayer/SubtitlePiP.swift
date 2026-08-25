@@ -45,15 +45,22 @@ final class SubtitlePiPController: NSObject, ObservableObject {
     private weak var displayLayer: AVSampleBufferDisplayLayer?
     private var pipController: AVPictureInPictureController?
     private var keepAliveTimer: Timer?
-    private var latestText = "♪"
-    private let frameSize = CGSize(width: 480, height: 200)
-    private var textColor: UIColor = .white
+    private var latestText = ""
+    private var frameSize = CGSize(width: 480, height: 200)
+    private var textColor: UIColor = .black
     private var fontScale: CGFloat = 1.0
 
     /// 更新字幕外观并立即重绘。
     func setAppearance(textColor: UIColor, fontScale: CGFloat) {
         self.textColor = textColor
         self.fontScale = fontScale
+        render(text: latestText)
+    }
+
+    /// 更新小窗渲染帧尺寸（宽高比）。重新开启画中画后新尺寸完全生效。
+    func setWindowSize(_ size: CGSize) {
+        guard size != frameSize else { return }
+        frameSize = size
         render(text: latestText)
     }
 
@@ -137,11 +144,13 @@ final class SubtitlePiPController: NSObject, ObservableObject {
             return
         }
 
-        if displayLayer.status == .failed {
-            statusMessage = "显示图层出错：\(displayLayer.error?.localizedDescription ?? "未知")"
-            displayLayer.flush()
+        // iOS 18 起这些接口迁移到 sampleBufferRenderer；部署目标 26.0，直接用新路径。
+        let renderer = displayLayer.sampleBufferRenderer
+        if renderer.status == .failed {
+            statusMessage = "显示图层出错：\(renderer.error?.localizedDescription ?? "未知")"
+            renderer.flush()
         }
-        displayLayer.enqueue(sampleBuffer)
+        renderer.enqueue(sampleBuffer)
     }
 }
 
@@ -253,8 +262,8 @@ enum SubtitleFrameRenderer {
             return nil
         }
 
-        // 深色背景。
-        context.setFillColor(UIColor.black.cgColor)
+        // 白色背景。
+        context.setFillColor(UIColor.white.cgColor)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
 
         // 翻转坐标系以配合 UIKit 文本绘制（CGContext 原点在左下）。
@@ -268,7 +277,8 @@ enum SubtitleFrameRenderer {
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byWordWrapping
 
-        let displayText = text.isEmpty ? "♪" : text
+        // 空文本（字幕间隙 / 空行）渲染成空白帧，不显示占位符号。
+        let displayText = text
         let fontSize = max(18, size.height * 0.22) * fontScale
         let textAttributes: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
@@ -364,7 +374,7 @@ final class SubtitlePiPDisplayView: UIView {
     init(controller: SubtitlePiPController) {
         self.controller = controller
         super.init(frame: .zero)
-        backgroundColor = .black
+        backgroundColor = .white
         displayLayer.videoGravity = .resizeAspect
     }
 

@@ -47,6 +47,9 @@ struct ContentView: View {
     @StateObject private var pipController = SubtitlePiPController()
     @StateObject private var albumStore = AlbumStore()
     @StateObject private var backgroundStore = BackgroundStore()
+    @StateObject private var chatController = ChatController()
+    /// 是否显示本地 AI 聊天面板。
+    @State private var showChat = false
     /// 允许与其他应用同时播放（混音）。
     @AppStorage("allowMixWithOthers") private var mixWithOthers = false
     /// 外观主题（跟随系统 / 浅色 / 深色）。
@@ -61,6 +64,7 @@ struct ContentView: View {
     @AppStorage("subtitleFontSize") private var subtitleFontSize: Double = 17
     @AppStorage("subtitleColor") private var subtitleColor: SubtitleColorChoice = .standard
     @AppStorage("subtitleLineCount") private var subtitleLineCount: Int = 3
+    @AppStorage("pipWindowSize") private var pipWindowSize: PiPWindowSize = .standard
     /// 睡眠定时器结束时间（nil 表示未开启）。
     @State private var sleepTimerEnd: Date?
     /// 上一拍仍在播放时的进度，用于可靠判断"自然播完"（AVAudioPlayer 播完会重置 currentTime）。
@@ -95,10 +99,10 @@ struct ContentView: View {
             return "等待字幕…"
         }
 
-        // SRT 字幕有明确的结束时间，超过后进入间隙则清空显示。
+        // SRT 字幕有明确的结束时间，超过后进入间隙则清空显示（不显示占位符号）。
         // LRC 没有结束时间（endTime 为 nil），保持显示直到下一句。
         if let endTime = line.endTime, effectiveTime > endTime {
-            return "♪"
+            return ""
         }
 
         return line.text
@@ -146,7 +150,8 @@ struct ContentView: View {
             return " "
         }
         let text = subtitles[lineIndex].text
-        return text.isEmpty ? "♪" : text
+        // 空行（字幕文件里的空歌词/间奏）用空白占位保留行高，不显示音符符号。
+        return text.isEmpty ? " " : text
     }
 
     private var subtitleBoxMinHeight: CGFloat {
@@ -168,18 +173,8 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             if isPlayerMinimized {
-                AudioFilesView(albumStore: albumStore, backgroundStore: backgroundStore, showsDoneButton: false) { urls, index, cover in
-                    playTrack(at: index, in: urls, fallbackCover: cover)
-                    withAnimation(.easeInOut) {
-                        isPlayerMinimized = false
-                    }
-                }
-                .safeAreaInset(edge: .bottom) {
-                    miniPlayerBar
-                        .padding(.horizontal)
-                        .padding(.vertical, 8)
-                }
-                .transition(.opacity)
+                libraryView
+                    .transition(.opacity)
             } else {
                 playerView
                     .padding()
@@ -223,14 +218,30 @@ struct ContentView: View {
                 pipController.onSkip = { seconds in
                     skip(by: seconds)
                 }
+                // 让 AI 助手能控制播放：把 AI 下达的指令映射到播放器动作。
+                chatController.onPlaybackCommand = { command in
+                    switch command {
+                    case .play: play()
+                    case .pause: pause()
+                    case .toggle: togglePlayback()
+                    case .next: nextTrack()
+                    case .prev: previousTrack()
+                    case .forward: skip(by: 10)
+                    case .back: skip(by: -10)
+                    }
+                }
             }
             copyBundledDemoToDocuments()
             loadDemoAudio()
             pipController.setAppearance(textColor: subtitleColor.uiColor, fontScale: CGFloat(subtitleFontSize / 17))
+            pipController.setWindowSize(pipWindowSize.frameSize)
             pipController.update(text: currentSubtitle)
         }
         .onChange(of: currentSubtitle) { _, newText in
             pipController.update(text: newText)
+        }
+        .onChange(of: pipWindowSize) { _, newSize in
+            pipController.setWindowSize(newSize.frameSize)
         }
         .onChange(of: subtitleColor) { _, _ in
             pipController.setAppearance(textColor: subtitleColor.uiColor, fontScale: CGFloat(subtitleFontSize / 17))
@@ -289,49 +300,43 @@ struct ContentView: View {
                 playInCurrentPlaylist(index: index)
             }
         }
+        .sheet(isPresented: $showChat) {
+            ChatBotView(
+                controller: chatController,
+                songTitle: playerMessage,
+                lyricsText: subtitles.map(\.text).joined(separator: "\n")
+            )
+        }
         .onOpenURL { url in
             importIncomingFile(url)
         }
         .toast($toastMessage)
     }
 
+    private var libraryView: some View {
+        AudioFilesView(albumStore: albumStore, backgroundStore: backgroundStore, showsDoneButton: false) { urls, index, cover in
+            playTrack(at: index, in: urls, fallbackCover: cover)
+            withAnimation(.easeInOut) {
+                isPlayerMinimized = false
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            miniPlayerBar
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+        }
+    }
+
     private var playerView: some View {
         VStack(spacing: 0) {
-            HStack {
-                Button {
-                    withAnimation(.easeInOut) {
-                        isPlayerMinimized = true
-                    }
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.title3)
-                }
-                .accessibilityLabel("收起播放器")
-
-                Spacer()
-            }
-            .padding(.bottom, 8)
+            collapseBar
 
             GeometryReader { proxy in
                 ScrollView {
                     VStack(spacing: 24) {
                         Spacer(minLength: 0)
 
-                        // 音频封面（无内嵌封面时用占位图）。
-                        Group {
-                            if let artwork {
-                                Image(uiImage: artwork)
-                                    .resizable()
-                                    .scaledToFill()
-                            } else {
-                                Image(systemName: "music.note")
-                                    .font(.system(size: 64))
-                                    .foregroundStyle(.blue)
-                            }
-                        }
-                        .frame(width: 200, height: 200)
-                        .background(.blue.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        coverArt
 
                         Text(playerMessage)
                             .font(.headline)
@@ -345,23 +350,7 @@ struct ContentView: View {
 
                         subtitleOffsetControls
 
-                        VStack(spacing: 8) {
-                            Slider(
-                                value: Binding(
-                                    get: { currentTime },
-                                    set: { seek(to: $0) }
-                                ),
-                                in: 0...max(duration, 1)
-                            )
-
-                            HStack {
-                                Text(timeText(currentTime))
-                                Spacer()
-                                Text(timeText(duration))
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        }
+                        progressSection
 
                         playbackControls
 
@@ -373,6 +362,60 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .bottom)
                 }
             }
+        }
+    }
+
+    private var collapseBar: some View {
+        HStack {
+            Button {
+                withAnimation(.easeInOut) {
+                    isPlayerMinimized = true
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.title3)
+            }
+            .accessibilityLabel("收起播放器")
+
+            Spacer()
+        }
+        .padding(.bottom, 8)
+    }
+
+    private var coverArt: some View {
+        Group {
+            if let artwork {
+                Image(uiImage: artwork)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "music.note")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.blue)
+            }
+        }
+        .frame(width: 200, height: 200)
+        .background(.blue.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var progressSection: some View {
+        VStack(spacing: 8) {
+            Slider(
+                value: Binding(
+                    get: { currentTime },
+                    set: { seek(to: $0) }
+                ),
+                in: 0...max(duration, 1)
+            )
+
+            HStack {
+                Text(timeText(currentTime))
+                Spacer()
+                Text(timeText(duration))
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 
@@ -566,6 +609,15 @@ struct ContentView: View {
             .accessibilityLabel("播放列表")
 
             Button {
+                showChat = true
+            } label: {
+                Image(systemName: "bubble.left.and.text.bubble.right")
+                    .font(.title3)
+                    .frame(maxWidth: .infinity)
+            }
+            .accessibilityLabel("AI 助手")
+
+            Button {
                 showSubtitleImporter = true
             } label: {
                 Image(systemName: "captions.bubble")
@@ -717,8 +769,8 @@ struct ContentView: View {
         }
 
         let ext = url.pathExtension.lowercased()
-        let audioExtensions = ["mp3", "m4a", "wav", "aac", "aiff"]
-        let subtitleExtensions = ["lrc", "srt", "vtt"]
+        let audioExtensions = audioFileExtensions
+        let subtitleExtensions = subtitleFileExtensions
         guard audioExtensions.contains(ext) || subtitleExtensions.contains(ext) else {
             return
         }
@@ -1029,14 +1081,10 @@ struct ContentView: View {
     }
 
     private func loadMatchingSubtitle(for audioURL: URL) {
-        let baseURL = audioURL.deletingPathExtension()
-        // 同名字幕优先级：SRT → VTT → LRC。
-        for fileExtension in ["srt", "vtt", "lrc"] {
-            let subtitleURL = baseURL.appendingPathExtension(fileExtension)
-            if FileManager.default.fileExists(atPath: subtitleURL.path) {
-                loadSubtitle(from: subtitleURL)
-                return
-            }
+        // 同名字幕查找与优先级见 matchingSubtitleURL（与列表里的字幕标记共用同一套规则）。
+        if let subtitleURL = matchingSubtitleURL(for: audioURL) {
+            loadSubtitle(from: subtitleURL)
+            return
         }
 
         subtitles = []
@@ -1052,9 +1100,11 @@ struct ContentView: View {
         let parsedLines: [SubtitleLine]
         switch subtitleURL.pathExtension.lowercased() {
         case "lrc":
+            // 跳过空歌词行（间奏 / 无字的时间戳），让上一句持续显示到下一句真正的歌词。
             parsedLines = subtitleText
                 .split(whereSeparator: \.isNewline)
                 .compactMap(parseLRCLine)
+                .filter { !$0.text.isEmpty }
         case "srt", "vtt":
             parsedLines = parseCueSubtitle(subtitleText)
         default:
@@ -1175,34 +1225,32 @@ struct AudioFilesView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var albumStore: AlbumStore
     @ObservedObject var backgroundStore: BackgroundStore
-    @State private var audioFiles: [URL] = []
-    @State private var showAudioImporter = false
-    @State private var libraryMode: LibraryMode = .files
+    @State private var libraryMode: LibraryMode = .albums
     @State private var showNewAlbumAlert = false
     @State private var newAlbumName = ""
     @State private var showSettings = false
     @State private var searchText = ""
-    @AppStorage("fileSort") private var fileSort: FileSort = .name
-    @State private var renameFileURL: URL?
     @State private var renameAlbumTarget: Album?
     @State private var renameText = ""
-    @State private var showRenameFile = false
     @State private var showRenameAlbum = false
     @State private var toastMessage: String?
+    // 小工具页「掷骰子 / 抽纸牌 / 抽签」的上次结果（在行尾显示，由各子页面写入）。
+    @AppStorage("lastDiceResult") private var lastDiceResult: String = ""
+    @AppStorage("lastCardResult") private var lastCardResult: String = ""
+    @AppStorage("lastLotteryResult") private var lastLotteryResult: String = ""
     @AppStorage("backgroundOpacity") private var backgroundOpacity: Double = 0.6
 
     var showsDoneButton: Bool = true
     let onSelect: ([URL], Int, UIImage?) -> Void
 
     enum LibraryMode: String, CaseIterable, Identifiable {
-        case files = "文件"
         case albums = "专辑"
+        case tools = "小工具"
         var id: String { rawValue }
     }
 
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
+    private var libraryContent: some View {
+        VStack(spacing: 0) {
                 Picker("显示方式", selection: $libraryMode) {
                     ForEach(LibraryMode.allCases) { mode in
                         Text(mode.rawValue).tag(mode)
@@ -1212,214 +1260,102 @@ struct AudioFilesView: View {
                 .padding(.horizontal)
                 .padding(.top, 8)
 
-                searchBar
+                if libraryMode == .albums {
+                    searchBar
+                }
 
                 switch libraryMode {
-                case .files:
-                    filesList
                 case .albums:
                     albumsList
+                case .tools:
+                    toolsList
                 }
             }
             .background {
-                // 音乐库自己画背景图（NavigationStack 自带不透明背景，靠 ContentView 的背景透不过来）。
-                if let background = backgroundStore.image {
-                    Image(uiImage: background)
-                        .resizable()
-                        .scaledToFill()
-                        .opacity(backgroundOpacity)
-                        .ignoresSafeArea()
-                }
+                libraryBackground
             }
             .navigationTitle("音乐库")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        showSettings = true
-                    } label: {
-                        Image(systemName: "gearshape")
+                libraryToolbar
+            }
+    }
+
+    var body: some View {
+        NavigationStack {
+            libraryContent
+                .alert("新建专辑", isPresented: $showNewAlbumAlert) {
+                    TextField("专辑名称", text: $newAlbumName)
+                    Button("创建") {
+                        albumStore.createAlbum(name: newAlbumName)
+                        newAlbumName = ""
                     }
-                    .accessibilityLabel("设置")
+                    Button("取消", role: .cancel) {
+                        newAlbumName = ""
+                    }
                 }
-                if libraryMode == .files {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Picker("排序方式", selection: $fileSort) {
-                                ForEach(FileSort.allCases) { sort in
-                                    Text(sort.label).tag(sort)
-                                }
+                .sheet(isPresented: $showSettings) {
+                    SettingsView(backgroundStore: backgroundStore, albumStore: albumStore)
+                }
+                // 「重命名专辑」alert 与「新建专辑」alert 不能叠在同一节点（会互相顶掉），单独挂到 Color.clear 节点。
+                .background(
+                    Color.clear.alert("重命名专辑", isPresented: $showRenameAlbum) {
+                        TextField("专辑名称", text: $renameText)
+                        Button("确定") {
+                            if let album = renameAlbumTarget {
+                                albumStore.renameAlbum(album, to: renameText)
                             }
-                        } label: {
-                            Image(systemName: "arrow.up.arrow.down")
                         }
-                        .accessibilityLabel("排序")
+                        Button("取消", role: .cancel) {}
                     }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        switch libraryMode {
-                        case .files:
-                            showAudioImporter = true
-                        case .albums:
-                            showNewAlbumAlert = true
-                        }
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel(libraryMode == .files ? "导入音频" : "新建专辑")
-                }
-                if showsDoneButton {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("完成") {
-                            dismiss()
-                        }
-                    }
-                }
-            }
-            .fileImporter(
-                isPresented: $showAudioImporter,
-                allowedContentTypes: [.audio],
-                allowsMultipleSelection: true
-            ) { result in
-                if case .success(let urls) = result {
-                    for url in urls {
-                        importAudioFile(from: url)
-                    }
-                    if !urls.isEmpty {
-                        toastMessage = "已导入 \(urls.count) 个音频"
-                    }
-                }
-            }
-            .alert("新建专辑", isPresented: $showNewAlbumAlert) {
-                TextField("专辑名称", text: $newAlbumName)
-                Button("创建") {
-                    albumStore.createAlbum(name: newAlbumName)
-                    newAlbumName = ""
-                }
-                Button("取消", role: .cancel) {
-                    newAlbumName = ""
-                }
-            }
-            .sheet(isPresented: $showSettings) {
-                SettingsView(backgroundStore: backgroundStore, albumStore: albumStore)
-            }
-            .alert("重命名", isPresented: $showRenameFile) {
-                TextField("名称", text: $renameText)
-                Button("确定") {
-                    if let url = renameFileURL {
-                        renameFile(url, to: renameText)
-                    }
-                }
-                Button("取消", role: .cancel) {}
-            }
-            .alert("重命名专辑", isPresented: $showRenameAlbum) {
-                TextField("专辑名称", text: $renameText)
-                Button("确定") {
-                    if let album = renameAlbumTarget {
-                        albumStore.renameAlbum(album, to: renameText)
-                    }
-                }
-                Button("取消", role: .cancel) {}
-            }
-        }
-        .onAppear {
-            loadAudioFiles()
-        }
-        .onChange(of: fileSort) { _, _ in
-            loadAudioFiles()
+                )
         }
         .toast($toastMessage)
     }
 
-    private var searchBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-
-            TextField(libraryMode == .files ? "搜索音频" : "搜索专辑", text: $searchText)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-
-            if !searchText.isEmpty {
-                Button {
-                    searchText = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .padding(.horizontal)
-        .padding(.top, 8)
-        .padding(.bottom, 4)
-    }
-
     @ViewBuilder
-    private var filesList: some View {
-        let files = filteredFiles
-        if files.isEmpty {
-            ContentUnavailableView(
-                searchText.isEmpty ? "还没有音频" : "无匹配结果",
-                systemImage: "music.note.list",
-                description: Text(searchText.isEmpty ? "点右上角 + 导入音频" : "换个关键词试试")
-            )
-        } else {
-            List {
-                ForEach(Array(files.enumerated()), id: \.element) { index, audioURL in
-                    Button {
-                        onSelect(files, index, nil)
-                        dismiss()
-                    } label: {
-                        HStack {
-                            Label {
-                                Text(audioURL.deletingPathExtension().lastPathComponent)
-                            } icon: {
-                                Image(systemName: "waveform")
-                            }
-
-                            Spacer()
-
-                            subtitleBadge(for: audioURL)
-                        }
-                    }
-                    .listRowBackground(rowBackground)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        if isDeletable(audioURL) {
-                            Button(role: .destructive) {
-                                deleteAudio(audioURL)
-                            } label: {
-                                Label("删除", systemImage: "trash")
-                            }
-                        }
-                    }
-                    .swipeActions(edge: .leading) {
-                        if isDeletable(audioURL) {
-                            Button {
-                                renameFileURL = audioURL
-                                renameText = audioURL.deletingPathExtension().lastPathComponent
-                                showRenameFile = true
-                            } label: {
-                                Label("重命名", systemImage: "pencil")
-                            }
-                            .tint(.blue)
-                        }
-                    }
-                }
-            }
-            .scrollContentBackground(backgroundStore.image == nil ? .automatic : .hidden)
+    private var libraryBackground: some View {
+        // 音乐库自己画背景图（NavigationStack 自带不透明背景，靠 ContentView 的背景透不过来）。
+        if let background = backgroundStore.image {
+            Image(uiImage: background)
+                .resizable()
+                .scaledToFill()
+                .opacity(backgroundOpacity)
+                .ignoresSafeArea()
         }
     }
 
-    private var filteredFiles: [URL] {
-        guard !searchText.isEmpty else { return audioFiles }
-        return audioFiles.filter {
-            $0.deletingPathExtension().lastPathComponent.localizedCaseInsensitiveContains(searchText)
+    @ToolbarContentBuilder
+    private var libraryToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .accessibilityLabel("设置")
         }
+        if libraryMode == .albums {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showNewAlbumAlert = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("新建专辑")
+            }
+        }
+        if showsDoneButton {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("完成") {
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    private var searchBar: some View {
+        LibrarySearchBar(text: $searchText, prompt: "搜索专辑")
     }
 
     private var filteredAlbums: [Album] {
@@ -1454,7 +1390,9 @@ struct AudioFilesView: View {
     @ViewBuilder
     private var albumsList: some View {
         let albums = filteredAlbums
-        if albums.isEmpty {
+        // 「未分类」虚拟专辑：把不在任何专辑里的音频聚在一起，方便浏览与播放。搜索专辑时不显示。
+        let uncategorized = searchText.isEmpty ? albumStore.uncategorizedURLs() : []
+        if albums.isEmpty && uncategorized.isEmpty {
             ContentUnavailableView(
                 searchText.isEmpty ? "还没有专辑" : "无匹配结果",
                 systemImage: "square.stack",
@@ -1462,6 +1400,32 @@ struct AudioFilesView: View {
             )
         } else {
             List {
+                if !uncategorized.isEmpty {
+                    NavigationLink {
+                        UncategorizedView(albumStore: albumStore) { urls, index, cover in
+                            onSelect(urls, index, cover)
+                            dismiss()
+                        }
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "tray.full")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 44, height: 44)
+                                .background(.gray.opacity(0.15))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                            Text("未分类")
+
+                            Spacer()
+
+                            Text("\(uncategorized.count) 首")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .listRowBackground(rowBackground)
+                }
+
                 ForEach(albums) { album in
                     NavigationLink {
                         AlbumDetailView(albumID: album.id, albumStore: albumStore) { urls, index, cover in
@@ -1505,159 +1469,76 @@ struct AudioFilesView: View {
         }
     }
 
+    // MARK: - 小工具页
+
     @ViewBuilder
-    private func subtitleBadge(for audioURL: URL) -> some View {
-        if let format = subtitleFormat(for: audioURL) {
-            Text(format)
-                .font(.caption2)
-                .fontWeight(.semibold)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(.blue.opacity(0.15), in: Capsule())
-                .foregroundStyle(.blue)
-        } else {
-            Image(systemName: "captions.bubble")
-                .foregroundStyle(.tertiary)
-                .accessibilityLabel("无字幕")
-        }
-    }
+    private var toolsList: some View {
+        List {
+            Section {
+                NavigationLink {
+                    DiceRollerView()
+                } label: {
+                    toolRow("掷骰子", systemImage: "dice.fill", result: lastDiceResult)
+                }
+                .listRowBackground(rowBackground)
 
-    /// 查找与音频同名的字幕文件，返回其格式标签（SRT → VTT → LRC 优先），没有则返回 nil。
-    private func subtitleFormat(for audioURL: URL) -> String? {
-        let base = audioURL.deletingPathExtension()
-        for fileExtension in ["srt", "vtt", "lrc"] {
-            let subtitleURL = base.appendingPathExtension(fileExtension)
-            if FileManager.default.fileExists(atPath: subtitleURL.path) {
-                return fileExtension.uppercased()
+                NavigationLink {
+                    CardDrawView()
+                } label: {
+                    toolRow("抽纸牌", systemImage: "suit.spade.fill", result: lastCardResult)
+                }
+                .listRowBackground(rowBackground)
+
+                NavigationLink {
+                    LotteryView()
+                } label: {
+                    toolRow("抽签", systemImage: "wand.and.stars", result: lastLotteryResult)
+                }
+                .listRowBackground(rowBackground)
+            } header: {
+                Text("小游戏")
+            } footer: {
+                Text("完全本地、真随机。以后新的小工具也会加在这里。")
+            }
+
+            Section("工具") {
+                NavigationLink {
+                    MetronomeView()
+                } label: {
+                    Label("节拍器", systemImage: "metronome")
+                }
+                .listRowBackground(rowBackground)
+
+                NavigationLink {
+                    AudioTrimPickerView()
+                } label: {
+                    Label("裁剪音频", systemImage: "scissors")
+                }
+                .listRowBackground(rowBackground)
+
+                NavigationLink {
+                    AudioDownloadView()
+                } label: {
+                    Label("从链接下载", systemImage: "arrow.down.circle")
+                }
+                .listRowBackground(rowBackground)
             }
         }
-        return nil
+        .scrollContentBackground(backgroundStore.image == nil ? .automatic : .hidden)
     }
 
-    /// 仅允许删除 Documents 目录内的文件；App bundle 内的样例（demo）不可删。
-    private func isDeletable(_ audioURL: URL) -> Bool {
-        guard let documentsURL = FileManager.default.urls(
-            for: .documentDirectory,
-            in: .userDomainMask
-        ).first else {
-            return false
-        }
-        return audioURL.resolvingSymlinksInPath().path
-            .hasPrefix(documentsURL.resolvingSymlinksInPath().path)
-    }
-
-    /// 删除音频文件，并一并移除同名的 .lrc / .srt 字幕。
-    private func deleteAudio(_ audioURL: URL) {
-        guard isDeletable(audioURL) else {
-            return
-        }
-
-        let base = audioURL.deletingPathExtension()
-        var urlsToDelete = [audioURL]
-        for fileExtension in ["lrc", "srt", "vtt"] {
-            let subtitleURL = base.appendingPathExtension(fileExtension)
-            if FileManager.default.fileExists(atPath: subtitleURL.path) {
-                urlsToDelete.append(subtitleURL)
+    /// 小工具行：图标 + 名称，行尾显示上次结果（没有就不显示）。
+    private func toolRow(_ title: String, systemImage: String, result: String) -> some View {
+        HStack {
+            Label(title, systemImage: systemImage)
+            Spacer()
+            if !result.isEmpty {
+                Text(result)
+                    .font(.callout)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
-
-        for url in urlsToDelete {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        loadAudioFiles()
-    }
-
-    /// 从系统「文件」导入音频，复制到 Documents 后刷新列表。
-    private func importAudioFile(from sourceURL: URL) {
-        let canAccessFile = sourceURL.startAccessingSecurityScopedResource()
-        defer {
-            if canAccessFile {
-                sourceURL.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        do {
-            let documentsURL = try FileManager.default.url(
-                for: .documentDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-            let destinationURL = uniqueFileURL(
-                in: documentsURL,
-                fileName: sourceURL.lastPathComponent
-            )
-            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-            loadAudioFiles()
-        } catch {
-            // 导入失败时保持列表不变。
-        }
-    }
-
-    /// 若目标文件名已存在，追加序号得到不冲突的 URL。
-    private func uniqueFileURL(in folder: URL, fileName: String) -> URL {
-        let originalURL = folder.appendingPathComponent(fileName)
-        guard FileManager.default.fileExists(atPath: originalURL.path) else {
-            return originalURL
-        }
-
-        let fileExtension = originalURL.pathExtension
-        let baseName = originalURL.deletingPathExtension().lastPathComponent
-        var number = 2
-        var candidateURL = originalURL
-
-        while FileManager.default.fileExists(atPath: candidateURL.path) {
-            let newName = "\(baseName) \(number)"
-            candidateURL = folder
-                .appendingPathComponent(newName)
-                .appendingPathExtension(fileExtension)
-            number += 1
-        }
-
-        return candidateURL
-    }
-
-    private func loadAudioFiles() {
-        var files = documentsAudioURLs()
-        if fileSort == .dateAdded {
-            files.sort { fileCreationDate($0) > fileCreationDate($1) }
-        }
-        audioFiles = files
-    }
-
-    private func fileCreationDate(_ url: URL) -> Date {
-        (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
-    }
-
-    /// 重命名音频文件，同步改名同名字幕并更新专辑引用。
-    private func renameFile(_ url: URL, to newBaseName: String) {
-        let trimmed = newBaseName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, isDeletable(url) else { return }
-
-        let folder = url.deletingLastPathComponent()
-        let fileExtension = url.pathExtension
-        let newURL = folder.appendingPathComponent(trimmed).appendingPathExtension(fileExtension)
-        guard !FileManager.default.fileExists(atPath: newURL.path) else { return }
-
-        do {
-            try FileManager.default.moveItem(at: url, to: newURL)
-        } catch {
-            return
-        }
-
-        // 同名字幕一起改名。
-        let base = url.deletingPathExtension()
-        for subtitleExtension in ["lrc", "srt", "vtt"] {
-            let subtitleURL = base.appendingPathExtension(subtitleExtension)
-            if FileManager.default.fileExists(atPath: subtitleURL.path) {
-                let newSubtitleURL = folder.appendingPathComponent(trimmed).appendingPathExtension(subtitleExtension)
-                try? FileManager.default.moveItem(at: subtitleURL, to: newSubtitleURL)
-            }
-        }
-
-        // 更新专辑里的文件引用。
-        albumStore.replaceFileName(url.lastPathComponent, with: newURL.lastPathComponent)
-        loadAudioFiles()
     }
 }
