@@ -28,6 +28,8 @@ struct ContentView: View {
     @State private var isPlaying = false
     @State private var audioPlayer: AVAudioPlayer?
     @State private var playerMessage = "正在准备测试音频…"
+    /// 内嵌元数据里的艺术家/社团名（无则 nil），显示在标题下方。
+    @State private var embeddedArtist: String?
     @State private var subtitles: [SubtitleLine] = []
     @State private var currentTime: TimeInterval = 0
     @State private var duration: TimeInterval = 0
@@ -338,9 +340,18 @@ struct ContentView: View {
 
                         coverArt
 
-                        Text(playerMessage)
-                            .font(.headline)
-                            .multilineTextAlignment(.center)
+                        VStack(spacing: 4) {
+                            Text(playerMessage)
+                                .font(.headline)
+                                .multilineTextAlignment(.center)
+
+                            if let embeddedArtist {
+                                Text(embeddedArtist)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                        }
 
                         subtitleBox
                             .contentShape(Rectangle())
@@ -729,7 +740,8 @@ struct ContentView: View {
             currentTime = 0
             isPlaying = false
             currentAudioURL = url
-            playerMessage = url.lastPathComponent
+            // 先用文件名兜底；内嵌标题读到后会在 loadArtwork 里替换掉。
+            playerMessage = url.deletingPathExtension().lastPathComponent
             loadMatchingSubtitle(for: url)
             loadArtwork(for: url)
             updateNowPlayingInfo()
@@ -738,24 +750,48 @@ struct ContentView: View {
         }
     }
 
-    /// 异步读取音频内嵌封面；无内嵌封面时用专辑封面兜底（界面显示占位图）。
+    /// 异步读取音频内嵌元数据：封面、标题、艺术家。
+    /// 音声作品常以 RJ 号命名文件，内嵌标题比文件名可读得多，所以优先用它。
+    /// 无内嵌封面时用专辑封面兜底（界面显示占位图）。
     private func loadArtwork(for url: URL) {
         artwork = albumFallbackCover
+        embeddedArtist = nil
         let asset = AVURLAsset(url: url)
         Task { @MainActor in
             guard let metadata = try? await asset.load(.commonMetadata) else {
                 return
             }
-            for item in metadata where item.commonKey == .commonKeyArtwork {
-                if let data = try? await item.load(.dataValue),
-                   let image = UIImage(data: data) {
-                    // 期间可能已切歌，确认仍是当前音频再更新。
-                    guard currentAudioURL == url else { return }
-                    artwork = image
-                    updateNowPlayingInfo()
-                    return
+            for item in metadata {
+                // 期间可能已切歌，每次写回前都确认仍是当前音频。
+                guard currentAudioURL == url else { return }
+                switch item.commonKey {
+                case .commonKeyArtwork:
+                    if let data = try? await item.load(.dataValue),
+                       let image = UIImage(data: data) {
+                        guard currentAudioURL == url else { return }
+                        artwork = image
+                    }
+                case .commonKeyTitle:
+                    if let title = try? await item.load(.stringValue),
+                       !title.trimmingCharacters(in: .whitespaces).isEmpty {
+                        guard currentAudioURL == url else { return }
+                        playerMessage = title
+                    }
+                case .commonKeyArtist, .commonKeyAlbumName:
+                    if let value = try? await item.load(.stringValue),
+                       !value.trimmingCharacters(in: .whitespaces).isEmpty {
+                        guard currentAudioURL == url else { return }
+                        // 艺术家优先；只有专辑名时用专辑名（音声常把社团名放这里）。
+                        if item.commonKey == .commonKeyArtist || embeddedArtist == nil {
+                            embeddedArtist = value
+                        }
+                    }
+                default:
+                    break
                 }
             }
+            guard currentAudioURL == url else { return }
+            updateNowPlayingInfo()
         }
     }
 
@@ -1069,8 +1105,9 @@ struct ContentView: View {
     /// 更新锁屏 / 控制中心显示的曲目信息与播放进度。
     private func updateNowPlayingInfo() {
         var info: [String: Any] = [:]
-        info[MPMediaItemPropertyTitle] = currentAudioURL?.deletingPathExtension().lastPathComponent ?? "Meloha"
-        info[MPMediaItemPropertyArtist] = "Meloha"
+        // 锁屏/控制中心显示内嵌标题与艺术家（读到的话），比文件名可读。
+        info[MPMediaItemPropertyTitle] = playerMessage
+        info[MPMediaItemPropertyArtist] = embeddedArtist ?? "Meloha"
         info[MPMediaItemPropertyPlaybackDuration] = duration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? playbackRate : 0.0
@@ -1360,8 +1397,9 @@ struct AudioFilesView: View {
 
     private var filteredAlbums: [Album] {
         guard !searchText.isEmpty else { return albumStore.albums }
+        // 搜名称 + 备注 + 标签：收藏多的时候常靠社团名/声优/标签找，光搜名称不够。
         return albumStore.albums.filter {
-            $0.name.localizedCaseInsensitiveContains(searchText)
+            $0.searchableText.localizedCaseInsensitiveContains(searchText)
         }
     }
 
@@ -1436,7 +1474,23 @@ struct AudioFilesView: View {
                         HStack(spacing: 12) {
                             albumThumbnail(for: album)
 
-                            Text(album.name)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(album.name)
+
+                                // 备注/标签是找作品的主要线索，列表里直接给一行摘要。
+                                if let note = album.note, !note.isEmpty {
+                                    Text(note)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                if !album.tagList.isEmpty {
+                                    Text(album.tagList.map { "#\($0)" }.joined(separator: " "))
+                                        .font(.caption2)
+                                        .foregroundStyle(.tint)
+                                        .lineLimit(1)
+                                }
+                            }
 
                             Spacer()
 

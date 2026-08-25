@@ -760,6 +760,21 @@ struct Album: Identifiable, Codable, Equatable {
     var imageFileNames: [String]?
     /// 曲目排序方式。旧数据为 nil —— 用 `sortMode` 读取，默认按名称升序。
     var sort: AlbumSort?
+    /// 备注（社团、声优、来源等自由文本）。参与专辑搜索。旧数据为 nil。
+    var note: String?
+    /// 标签（如「治愈」「已听完」）。一张专辑可有多个，参与搜索与筛选。旧数据为 nil。
+    var tags: [String]?
+
+    /// 标签列表（旧数据视为空）。
+    var tagList: [String] {
+        get { tags ?? [] }
+        set { tags = newValue.isEmpty ? nil : newValue }
+    }
+
+    /// 搜索用的可匹配文本：名称 + 备注 + 标签。
+    var searchableText: String {
+        ([name, note ?? ""] + tagList).joined(separator: " ")
+    }
 
     /// 排序方式（旧数据默认按名称升序）。
     var sortMode: AlbumSort {
@@ -792,7 +807,9 @@ struct Album: Identifiable, Codable, Equatable {
         coverFileName: String? = nil,
         groups: [AlbumGroup]? = nil,
         imageFileNames: [String]? = nil,
-        sort: AlbumSort? = nil
+        sort: AlbumSort? = nil,
+        note: String? = nil,
+        tags: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -801,6 +818,8 @@ struct Album: Identifiable, Codable, Equatable {
         self.groups = groups
         self.imageFileNames = imageFileNames
         self.sort = sort
+        self.note = note
+        self.tags = tags
     }
 }
 
@@ -1070,6 +1089,33 @@ final class AlbumStore: ObservableObject {
             return
         }
         try? data.write(to: storeURL, options: .atomic)
+    }
+
+    /// 设置备注与标签。标签去空白、去重、丢掉空项。
+    func setDetails(note: String, tags: [String], for album: Album) {
+        guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
+        let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        albums[index].note = trimmedNote.isEmpty ? nil : trimmedNote
+
+        var seen = Set<String>()
+        albums[index].tagList = tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+        save()
+    }
+
+    /// 库里出现过的所有标签（按使用频次降序，供快速选择）。
+    func allTags() -> [String] {
+        var counts: [String: Int] = [:]
+        for album in albums {
+            for tag in album.tagList {
+                counts[tag, default: 0] += 1
+            }
+        }
+        return counts.sorted {
+            $0.value != $1.value ? $0.value > $1.value
+                : $0.key.localizedStandardCompare($1.key) == .orderedAscending
+        }.map(\.key)
     }
 
     func createAlbum(name: String) {
@@ -1420,6 +1466,10 @@ struct AlbumDetailView: View {
     @State private var renameGroupTarget: AlbumGroup?
     /// 正在选分组的歌（文件名，非 nil 时弹分组选择）。
     @State private var moveTarget: String?
+    /// 备注 / 标签编辑。
+    @State private var showDetailsEditor = false
+    @State private var noteInput = ""
+    @State private var tagsInput = ""
     @State private var toastMessage: String?
 
     private var album: Album? {
@@ -1555,6 +1605,11 @@ struct AlbumDetailView: View {
                     set: { previewImageName = $0?.fileName }
                 )) { target in
                     imageViewer(for: target)
+                }
+            )
+            .background(
+                Color.clear.sheet(isPresented: $showDetailsEditor) {
+                    detailsEditor
                 }
             )
             .onAppear {
@@ -1698,6 +1753,7 @@ struct AlbumDetailView: View {
         if let album {
             List {
                 coverSection(album)
+                detailsSection(album)
                 imagesSection(album)
                 tracksSections(album)
             }
@@ -1802,6 +1858,40 @@ struct AlbumDetailView: View {
             }
             .frame(maxWidth: .infinity)
             .listRowBackground(Color.clear)
+        }
+    }
+
+    // MARK: 备注 / 标签
+
+    /// 备注与标签：收藏量大时靠社团名、声优、标签来找作品，比只有专辑名好用。
+    @ViewBuilder
+    private func detailsSection(_ album: Album) -> some View {
+        Section {
+            if let note = album.note, !note.isEmpty {
+                Text(note)
+                    .font(.callout)
+            }
+
+            if !album.tagList.isEmpty {
+                FlowTags(tags: album.tagList)
+            }
+
+            Button {
+                noteInput = album.note ?? ""
+                tagsInput = album.tagList.joined(separator: ", ")
+                showDetailsEditor = true
+            } label: {
+                Label(
+                    album.note == nil && album.tagList.isEmpty ? "添加备注 / 标签" : "编辑备注 / 标签",
+                    systemImage: "tag"
+                )
+            }
+        } header: {
+            Text("信息")
+        } footer: {
+            if album.note == nil && album.tagList.isEmpty {
+                Text("可以记社团、声优、来源等；标签用于快速筛选。备注和标签都能被搜索到。")
+            }
         }
     }
 
@@ -2006,6 +2096,68 @@ struct AlbumDetailView: View {
         }
     }
 
+    /// 备注 / 标签编辑器。标签用逗号分隔输入，另可点已有标签快速追加。
+    private var detailsEditor: some View {
+        NavigationStack {
+            Form {
+                Section("备注") {
+                    TextField("社团、声优、来源…", text: $noteInput, axis: .vertical)
+                        .lineLimit(3...6)
+                }
+
+                Section {
+                    TextField("用逗号分隔，如：治愈, 已听完", text: $tagsInput, axis: .vertical)
+                        .lineLimit(2...4)
+                } header: {
+                    Text("标签")
+                } footer: {
+                    Text("英文/中文逗号都可以。重复标签会自动去掉。")
+                }
+
+                // 库里已有的标签：点一下追加，省得每次重新拼写。
+                let existing = albumStore.allTags()
+                if !existing.isEmpty {
+                    Section("已有标签") {
+                        FlowTags(tags: existing) { tag in
+                            appendTag(tag)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("备注与标签")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { showDetailsEditor = false }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("保存") { saveDetails() }
+                }
+            }
+        }
+    }
+
+    private func appendTag(_ tag: String) {
+        let current = Self.parseTags(tagsInput)
+        guard !current.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) else {
+            return
+        }
+        tagsInput = (current + [tag]).joined(separator: ", ")
+    }
+
+    private func saveDetails() {
+        guard let album else { return }
+        albumStore.setDetails(note: noteInput, tags: Self.parseTags(tagsInput), for: album)
+        showDetailsEditor = false
+    }
+
+    /// 按中英文逗号切分标签输入。
+    private static func parseTags(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0 == "," || $0 == "，" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
     @ViewBuilder
     private func coverView(for album: Album) -> some View {
         if let cover = albumStore.coverImage(for: album) {
@@ -2021,6 +2173,61 @@ struct AlbumDetailView: View {
                 .frame(width: 150, height: 150)
                 .background(.gray.opacity(0.15))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+}
+
+// MARK: - 标签流式排布
+
+/// 标签横向排布、宽度不够就换行。`onTap` 非 nil 时每个标签可点。
+struct FlowTags: View {
+    let tags: [String]
+    var onTap: ((String) -> Void)?
+
+    var body: some View {
+        // iOS 16+ 的 Layout 协议有现成方案，但这里用 SwiftUI 自带的换行布局更省事。
+        ViewThatFits(in: .horizontal) {
+            row(tags)
+            wrapped
+        }
+    }
+
+    private var wrapped: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(chunked(), id: \.first) { line in
+                row(line)
+            }
+        }
+    }
+
+    private func row(_ items: [String]) -> some View {
+        HStack(spacing: 6) {
+            ForEach(items, id: \.self) { tag in
+                chip(tag)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func chip(_ tag: String) -> some View {
+        let label = Text("#\(tag)")
+            .font(.caption)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.tint.opacity(0.15), in: Capsule())
+
+        if let onTap {
+            Button { onTap(tag) } label: { label }
+                .buttonStyle(.plain)
+        } else {
+            label
+        }
+    }
+
+    /// 粗略按每行 3 个切分——标签通常很短，够用且不必测量文字宽度。
+    private func chunked() -> [[String]] {
+        stride(from: 0, to: tags.count, by: 3).map {
+            Array(tags[$0..<min($0 + 3, tags.count)])
         }
     }
 }
