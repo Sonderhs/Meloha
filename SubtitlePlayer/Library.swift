@@ -826,7 +826,7 @@ struct Album: Identifiable, Codable, Equatable {
 /// 音乐库识别的音频扩展名（导入、下载校验、分享打开都用这一份）。
 let audioFileExtensions = ["mp3", "m4a", "wav", "aac", "aiff"]
 
-/// 列出 Documents 内所有音频（含 bundle 里的 demo），按名称排序。
+/// 列出 Documents 内所有音频，按名称排序。
 func documentsAudioURLs() -> [URL] {
     guard let documentsURL = FileManager.default.urls(
         for: .documentDirectory,
@@ -835,19 +835,11 @@ func documentsAudioURLs() -> [URL] {
         return []
     }
 
-    var files = (try? FileManager.default.contentsOfDirectory(
+    let files = (try? FileManager.default.contentsOfDirectory(
         at: documentsURL,
         includingPropertiesForKeys: [.isRegularFileKey],
         options: [.skipsHiddenFiles]
     ))?.filter { audioFileExtensions.contains($0.pathExtension.lowercased()) } ?? []
-
-    // 内置示例 demo：随包只读，无法真正删除。用户在「未分类」里删过后置 hideDemoTrack，
-    // 之后不再补回；否则默认补上（首次使用时有内容可试听）。
-    if !UserDefaults.standard.bool(forKey: "hideDemoTrack"),
-       let demoURL = Bundle.main.url(forResource: "demo", withExtension: "wav"),
-       !files.contains(where: { $0.lastPathComponent == demoURL.lastPathComponent }) {
-        files.append(demoURL)
-    }
 
     return files.sorted {
         $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
@@ -2597,32 +2589,19 @@ struct UncategorizedView: View {
         files = albumStore.uncategorizedURLs()
     }
 
-    /// 仅允许删除 Documents 内的文件；App 内置样例（demo）不可删。
-    private func isDeletable(_ url: URL) -> Bool {
-        guard let documentsURL = FileManager.default.urls(
-            for: .documentDirectory, in: .userDomainMask
-        ).first else { return false }
-        return url.resolvingSymlinksInPath().path
-            .hasPrefix(documentsURL.resolvingSymlinksInPath().path)
-    }
-
-    /// 删除音频。Documents 内的真实文件连同同名字幕（.lrc/.srt/.vtt）一并删除；
-    /// App 内置样例（demo）无法真正删除，改为持久隐藏（置 hideDemoTrack），之后不再出现。
+    /// 删除音频，连同同名字幕（.lrc/.srt/.vtt）一并删除。
+    /// 库里的文件都在 Documents 内（可写），不再有只读的内置示例需要特殊处理。
     private func delete(_ url: URL) {
-        if isDeletable(url) {
-            let base = url.deletingPathExtension()
-            var urlsToDelete = [url]
-            for ext in subtitleFileExtensions {
-                let sub = base.appendingPathExtension(ext)
-                if FileManager.default.fileExists(atPath: sub.path) {
-                    urlsToDelete.append(sub)
-                }
+        let base = url.deletingPathExtension()
+        var urlsToDelete = [url]
+        for ext in subtitleFileExtensions {
+            let sub = base.appendingPathExtension(ext)
+            if FileManager.default.fileExists(atPath: sub.path) {
+                urlsToDelete.append(sub)
             }
-            for u in urlsToDelete {
-                try? FileManager.default.removeItem(at: u)
-            }
-        } else {
-            UserDefaults.standard.set(true, forKey: "hideDemoTrack")
+        }
+        for u in urlsToDelete {
+            try? FileManager.default.removeItem(at: u)
         }
         reload()
     }

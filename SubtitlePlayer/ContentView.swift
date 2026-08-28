@@ -27,7 +27,7 @@ struct SubtitleLine {
 struct ContentView: View {
     @State private var isPlaying = false
     @State private var audioPlayer: AVAudioPlayer?
-    @State private var playerMessage = "正在准备测试音频…"
+    @State private var playerMessage = "还没有选择音频"
     /// 内嵌元数据里的艺术家/社团名（无则 nil），显示在标题下方。
     @State private var embeddedArtist: String?
     @State private var subtitles: [SubtitleLine] = []
@@ -36,7 +36,7 @@ struct ContentView: View {
     @State private var showSubtitleImporter = false
     @State private var isPlayerMinimized = true
     @State private var currentAudioURL: URL?
-    @State private var subtitleStatus = "正在准备字幕…"
+    @State private var subtitleStatus = "从音乐库选一首开始"
     @State private var artwork: UIImage?
     /// 从专辑播放时的封面兜底（音频无内嵌封面时使用）。
     @State private var albumFallbackCover: UIImage?
@@ -233,8 +233,7 @@ struct ContentView: View {
                     }
                 }
             }
-            copyBundledDemoToDocuments()
-            loadDemoAudio()
+            removeLegacyDemoFiles()
             pipController.setAppearance(textColor: subtitleColor.uiColor, fontScale: CGFloat(subtitleFontSize / 17))
             pipController.setWindowSize(pipWindowSize.frameSize)
             pipController.update(text: currentSubtitle)
@@ -683,51 +682,22 @@ struct ContentView: View {
         subtitleOffset = ((subtitleOffset + delta) * 10).rounded() / 10
     }
 
-    private func loadDemoAudio() {
-        let documentsDemoURL = FileManager.default.urls(
-            for: .documentDirectory,
-            in: .userDomainMask
-        ).first?.appendingPathComponent("demo.wav")
-        let audioURL = documentsDemoURL.flatMap { url in
-            FileManager.default.fileExists(atPath: url.path) ? url : nil
-        } ?? Bundle.main.url(forResource: "demo", withExtension: "wav")
+    /// 一次性清理早期版本自动拷进 Documents 的示例文件（demo.wav / demo.lrc）。
+    /// 内置示例已移除，这些残留只会混在音乐库里。清理过后置标记，之后不再扫。
+    private func removeLegacyDemoFiles() {
+        let cleanupKey = "didRemoveLegacyDemoFiles"
+        guard !UserDefaults.standard.bool(forKey: cleanupKey) else { return }
 
-        guard let audioURL else {
-            playerMessage = "找不到 demo.wav"
-            return
-        }
-
-        playlist = [audioURL]
-        currentIndex = 0
-        loadAudio(from: audioURL)
-    }
-
-    private func copyBundledDemoToDocuments() {
-        guard let documentsURL = FileManager.default.urls(
-            for: .documentDirectory,
-            in: .userDomainMask
-        ).first else {
-            return
-        }
-
-        let filesToCopy = [
-            ("demo", "wav"),
-            ("demo", "lrc")
-        ]
-
-        for (name, fileExtension) in filesToCopy {
-            guard let sourceURL = Bundle.main.url(forResource: name, withExtension: fileExtension) else {
-                continue
-            }
-
-            let destinationURL = documentsURL
-                .appendingPathComponent(name)
-                .appendingPathExtension(fileExtension)
-
-            if !FileManager.default.fileExists(atPath: destinationURL.path) {
-                try? FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        if let documentsURL = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        ).first {
+            for name in ["demo.wav", "demo.lrc"] {
+                try? FileManager.default.removeItem(at: documentsURL.appendingPathComponent(name))
             }
         }
+        // 旧的隐藏标记不再有用（demo 已彻底移除），顺手清掉。
+        UserDefaults.standard.removeObject(forKey: "hideDemoTrack")
+        UserDefaults.standard.set(true, forKey: cleanupKey)
     }
 
     private func loadAudio(from url: URL) {
