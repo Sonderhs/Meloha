@@ -39,118 +39,7 @@ extension View {
     }
 }
 
-// MARK: - 备份（导出 / 导入）
-
-struct BackupSettings: Codable {
-    var allowMixWithOthers: Bool?
-    var appTheme: String?
-    var backgroundOpacity: Double?
-    var playbackRate: Double?
-    var playMode: String?
-    var subtitleFontSize: Double?
-    var subtitleColor: String?
-    var subtitleLineCount: Int?
-    var fileSort: String?
-    var chatSystemPrompt: String?
-}
-
-struct BackupEntry: Codable {
-    var name: String
-    var data: Data
-}
-
-struct BackupFile: Codable {
-    var version: Int
-    var settings: BackupSettings
-    var files: [BackupEntry]
-}
-
-enum BackupManager {
-    private static var documentsURL: URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-    }
-
-    /// 打包 Documents 内所有文件 + 设置为一份备份数据。
-    static func makeBackupData() throws -> Data {
-        guard let documentsURL else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: documentsURL.path)) ?? []
-        var entries: [BackupEntry] = []
-        for name in names {
-            let url = documentsURL.appendingPathComponent(name)
-            var isDirectory: ObjCBool = false
-            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
-            if isDirectory.boolValue { continue }
-            if let data = try? Data(contentsOf: url) {
-                entries.append(BackupEntry(name: name, data: data))
-            }
-        }
-
-        let defaults = UserDefaults.standard
-        let settings = BackupSettings(
-            allowMixWithOthers: defaults.object(forKey: "allowMixWithOthers") as? Bool,
-            appTheme: defaults.string(forKey: "appTheme"),
-            backgroundOpacity: defaults.object(forKey: "backgroundOpacity") as? Double,
-            playbackRate: defaults.object(forKey: "playbackRate") as? Double,
-            playMode: defaults.string(forKey: "playMode"),
-            subtitleFontSize: defaults.object(forKey: "subtitleFontSize") as? Double,
-            subtitleColor: defaults.string(forKey: "subtitleColor"),
-            subtitleLineCount: defaults.object(forKey: "subtitleLineCount") as? Int,
-            fileSort: defaults.string(forKey: "fileSort"),
-            chatSystemPrompt: defaults.string(forKey: "chatSystemPrompt")
-        )
-
-        let backup = BackupFile(version: 1, settings: settings, files: entries)
-        return try JSONEncoder().encode(backup)
-    }
-
-    /// 用备份数据覆盖恢复。
-    static func restore(from data: Data) throws {
-        let backup = try JSONDecoder().decode(BackupFile.self, from: data)
-        guard let documentsURL else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-
-        for entry in backup.files {
-            let url = documentsURL.appendingPathComponent(entry.name)
-            try? entry.data.write(to: url, options: .atomic)
-        }
-
-        let defaults = UserDefaults.standard
-        let s = backup.settings
-        if let v = s.allowMixWithOthers { defaults.set(v, forKey: "allowMixWithOthers") }
-        if let v = s.appTheme { defaults.set(v, forKey: "appTheme") }
-        if let v = s.backgroundOpacity { defaults.set(v, forKey: "backgroundOpacity") }
-        if let v = s.playbackRate { defaults.set(v, forKey: "playbackRate") }
-        if let v = s.playMode { defaults.set(v, forKey: "playMode") }
-        if let v = s.subtitleFontSize { defaults.set(v, forKey: "subtitleFontSize") }
-        if let v = s.subtitleColor { defaults.set(v, forKey: "subtitleColor") }
-        if let v = s.subtitleLineCount { defaults.set(v, forKey: "subtitleLineCount") }
-        if let v = s.fileSort { defaults.set(v, forKey: "fileSort") }
-        if let v = s.chatSystemPrompt { defaults.set(v, forKey: "chatSystemPrompt") }
-    }
-}
-
-/// 备份文件包装（用于 .fileExporter）。
-struct BackupDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.json] }
-
-    var data: Data
-
-    init(data: Data) {
-        self.data = data
-    }
-
-    init(configuration: ReadConfiguration) throws {
-        data = configuration.file.regularFileContents ?? Data()
-    }
-
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: data)
-    }
-}
+// 备份的导出 / 导入见 Backup.swift（流式实现，不把整个库读进内存）。
 
 // MARK: - 背景图片
 
@@ -363,10 +252,11 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var pickerItem: PhotosPickerItem?
-    @State private var exportDocument: BackupDocument?
-    @State private var showExporter = false
+    @StateObject private var backup = BackupTaskRunner()
     @State private var showImporter = false
     @State private var backupMessage: String?
+    /// 备份体积。算它要遍历整个 Documents，只在出现时算一次，不能放进 body。
+    @State private var backupSizeText = "…"
 
     /// 背景图片选择器。标题在闭包外算好（此处是 @MainActor），
     /// 再把 String 传进 PhotosPicker 的 @Sendable label 闭包，避免在闭包里读 @MainActor 属性 `image`。
@@ -473,22 +363,7 @@ struct SettingsView: View {
                     Text("开启后，本应用的声音会与其他应用混合播放，而不会中断它们。注意：混音模式下，锁屏 / 控制中心的播放控制可能不可用。")
                 }
 
-                Section {
-                    Button {
-                        exportBackup()
-                    } label: {
-                        Label("导出备份", systemImage: "square.and.arrow.up")
-                    }
-                    Button {
-                        showImporter = true
-                    } label: {
-                        Label("导入备份", systemImage: "square.and.arrow.down")
-                    }
-                } header: {
-                    Text("数据")
-                } footer: {
-                    Text("导出会把所有音频、字幕、专辑、封面、背景与设置打包成一个文件（可存到「文件」/iCloud）；导入会用备份覆盖当前数据，用于重装后恢复。")
-                }
+                backupSection
             }
             .navigationTitle("设置")
             .toolbar {
@@ -498,6 +373,13 @@ struct SettingsView: View {
                     }
                 }
             }
+            .task {
+                // 遍历整个 Documents，放后台算，别卡住设置页的出现动画。
+                let bytes = await Task.detached(priority: .utility) {
+                    BackupManager.estimatedSize()
+                }.value
+                backupSizeText = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+            }
             .onChange(of: pickerItem) { _, item in
                 guard let item else { return }
                 Task {
@@ -506,33 +388,30 @@ struct SettingsView: View {
                     }
                 }
             }
-            .fileExporter(
-                isPresented: $showExporter,
-                document: exportDocument,
-                contentType: .json,
-                defaultFilename: "Meloha备份"
-            ) { result in
-                if case .success = result {
-                    backupMessage = "备份已导出"
+            // 导出面板挂在独立节点：这个视图上已经有 fileImporter 和 alert，
+            // 同节点再叠 sheet 容易互相顶掉。
+            .background(
+                Color.clear.sheet(item: $backup.exportedFile) { file in
+                    BackupExportPicker(url: file.url) { saved in
+                        BackupManager.cleanUpTemporary(file.url)
+                        backup.exportedFile = nil
+                        if saved { backupMessage = "备份已导出" }
+                    }
                 }
-            }
+            )
             .fileImporter(
                 isPresented: $showImporter,
-                allowedContentTypes: [.json]
+                // 新备份是 .melohabk（无注册 UTType，按 data 匹配），旧备份是 .json。
+                allowedContentTypes: [.data, .json]
             ) { result in
                 guard case .success(let url) = result else { return }
-                let accessing = url.startAccessingSecurityScopedResource()
-                defer {
-                    if accessing { url.stopAccessingSecurityScopedResource() }
-                }
-                do {
-                    let data = try Data(contentsOf: url)
-                    try BackupManager.restore(from: data)
+                backup.restore(from: url) {
+                    // 恢复换掉了大批文件：索引与封面缓存全部作废。
+                    DocumentsIndex.shared.refresh()
+                    CoverImageCache.shared.removeAll()
                     albumStore.reload()
                     backgroundStore.reload()
                     backupMessage = "导入成功，已恢复数据"
-                } catch {
-                    backupMessage = "导入失败：文件无法读取或格式不对"
                 }
             }
             .alert("提示", isPresented: Binding(
@@ -546,15 +425,68 @@ struct SettingsView: View {
         }
     }
 
-    private func exportBackup() {
-        do {
-            let data = try BackupManager.makeBackupData()
-            exportDocument = BackupDocument(data: data)
-            showExporter = true
-        } catch {
-            backupMessage = "导出失败"
+    /// 数据区：导出 / 导入备份。GB 级的库要跑几十秒，所以带进度和取消。
+    @ViewBuilder
+    private var backupSection: some View {
+        Section {
+            if backup.isBusy {
+                backupProgressRow
+                Button(role: .destructive) {
+                    backup.cancel()
+                } label: {
+                    Label("取消", systemImage: "stop.fill")
+                }
+            } else {
+                Button {
+                    backup.export()
+                } label: {
+                    Label("导出备份", systemImage: "square.and.arrow.up")
+                }
+                Button {
+                    showImporter = true
+                } label: {
+                    Label("导入备份", systemImage: "square.and.arrow.down")
+                }
+            }
+
+            if case .failed(let message) = backup.phase {
+                Label {
+                    Text(message).font(.callout)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+        } header: {
+            Text("数据")
+        } footer: {
+            Text("导出会把所有音频、字幕、专辑、封面、背景与设置打包成一个文件（可存到「文件」/iCloud）；导入会用备份覆盖当前数据，用于重装后恢复。当前约 \(backupSizeText)，库大时导出需要一点时间。")
         }
     }
+
+    @ViewBuilder
+    private var backupProgressRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ProgressView(value: backup.progressValue ?? 0)
+            HStack {
+                Text(backupPhaseLabel)
+                Spacer()
+                Text("\(Int((backup.progressValue ?? 0) * 100))%")
+                    .monospacedDigit()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var backupPhaseLabel: String {
+        switch backup.phase {
+        case .exporting: return "正在打包…"
+        case .importing: return "正在恢复…"
+        case .idle, .failed: return ""
+        }
+    }
+
 }
 
 // MARK: - 当前播放列表（播放队列）

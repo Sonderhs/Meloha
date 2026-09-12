@@ -18,6 +18,7 @@
 - `Metronome.swift`：节拍器引擎 `Metronome` + 界面 `MetronomeView`。
 - `MiniTools.swift`：小工具子页面 —— `DiceRollerView`（掷骰子）/ `CardDrawView`+`PlayingCard`（抽纸牌）/ `LotteryView`（抽签）。
 - `AudioTrimmer.swift`：音频裁剪 —— `trimAudio()` 引擎 + `parseTimeInput()`/`formatTrimTime()` + `AudioTrimPickerView`（选文件）→ `AudioTrimView`（裁剪界面）。
+- `Backup.swift`：备份导出/导入。自定义流式容器（魔数 + 内容 + 尾部清单），`BackupManager` 负责读写、`BackupTaskRunner` 管进度/取消、`BackupExportPicker` 递文件给系统。旧 JSON 备份仍可导入。
 - `ChatBot.swift` / `ChatView.swift`：本地 MLX 聊天机器人（控制器 + 界面）。
 - `SubtitlePiP.swift`：画中画字幕渲染。
 - `Info.plist`（物理文件，位于 SRCROOT）：后台音频/PiP 的 `UIBackgroundModes` 必须写在这（见记忆）。
@@ -94,7 +95,10 @@ xcodebuild -project SubtitlePlayer.xcodeproj -scheme SubtitlePlayer -sdk iphoneo
 7. **新增 SF Symbol 前先验证存在**：图标名写错**不会编译报错**，只会静默渲染成空白。`captions.bubble.slash`、`bubble.slash`、`text.bubble.slash` 都不存在。验证方法：写个小 Swift 脚本用 `NSImage(systemSymbolName:accessibilityDescription:)` 判空（macOS 与 iOS 共用同一套符号库）。
 8. **SwiftUI 类型检查超时**：`body` 里塞太多嵌套条件会报 "unable to type-check this expression in reasonable time"（这是**真报错**，不是 SourceKit 误报）。拆成多个 `@ViewBuilder` 计算属性即可。
 9. **`.tint.gradient` 不存在**：`ShapeStyle` 的 `.tint` 没有 `.gradient` 成员，用 `Color.accentColor.gradient`。
-10. **MLX 聊天机器人**：3 个 SPM 依赖 + Metal 工具链 + 只能真机 + 跳过插件/宏验证；国内下载走 `HF_ENDPOINT` 镜像；模型缓存持久化只设 `HF_HOME` 指向 `Library/hf-models`。（记忆：`mlx-local-chatbot-setup`）
+10. **搬大文件时循环里必须套 `autoreleasepool`**：`FileHandle.read(upToCount:)` 返回的是桥接来的 `NSData`，进当前 autorelease pool，而循环中途不排空。少了它，"流式"读 300MB 会实打实攒下 300MB 匿名内存（实测 301.3 MB → 加上后 1.2 MB）。这是导出备份闪退的第二个原因。
+11. **量内存别看 `resident_size`**：它把文件页缓存（干净页、系统随时可回收）也算进去，流式搬运会显示成与数据等大，看不出问题。iOS 的 jetsam 看的是 `phys_footprint`，而定位泄漏要看 `task_vm_info.internal`（匿名内存）。
+12. **`UInt64` 减法会 trap**：从文件读来的长度/偏移先校验再参与算术。写成 `fileSize - footer - manifestLength` 或 `reduce(+)`、`Int64(totalBytes)`，遇到坏备份就是直接闪退而不是报错。已在 `restoreStreaming` 里改成加法比较 + `addingReportingOverflow`。
+13. **MLX 聊天机器人**：3 个 SPM 依赖 + Metal 工具链 + 只能真机 + 跳过插件/宏验证；国内下载走 `HF_ENDPOINT` 镜像；模型缓存持久化只设 `HF_HOME` 指向 `Library/hf-models`。（记忆：`mlx-local-chatbot-setup`）
 
 ## 五、待办 / 提过但用户没定的事
 
