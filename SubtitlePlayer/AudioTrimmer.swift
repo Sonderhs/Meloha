@@ -93,6 +93,7 @@ func trimAudio(
         throw AudioTrimError.exportFailed(error.localizedDescription)
     }
 
+    DocumentsIndex.refreshSoon()
     return destination
 }
 

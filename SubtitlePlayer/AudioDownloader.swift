@@ -176,6 +176,7 @@ final class AudioDownloader: NSObject, ObservableObject {
             try? FileManager.default.removeItem(at: tempURL)
             throw AudioDownloadError.writeFailed(error.localizedDescription)
         }
+        DocumentsIndex.shared.refresh()
         return destination
     }
 
