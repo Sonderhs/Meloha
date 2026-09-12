@@ -28,6 +28,8 @@ struct ContentView: View {
     @State private var isPlaying = false
     @State private var audioPlayer: AVAudioPlayer?
     @State private var playerMessage = "还没有选择音频"
+    /// 下滑收起播放器时的实时位移（0 表示未拖动）。
+    @State private var dragOffset: CGFloat = 0
     /// 内嵌元数据里的艺术家/社团名（无则 nil），显示在标题下方。
     @State private var embeddedArtist: String?
     @State private var subtitles: [SubtitleLine] = []
@@ -180,7 +182,11 @@ struct ContentView: View {
             } else {
                 playerView
                     .padding()
+                    // 跟随下滑手势整页位移，松手时由手势回调决定收起或弹回。
+                    .offset(y: dragOffset)
                     .transition(.move(edge: .bottom))
+                    // 播放器有多个展开入口，统一在出现时归零，避免带着上次的位移显示。
+                    .onAppear { dragOffset = 0 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -336,6 +342,7 @@ struct ContentView: View {
     private var playerView: some View {
         VStack(spacing: 0) {
             collapseBar
+                .gesture(collapseDragGesture)
 
             GeometryReader { proxy in
                 ScrollView {
@@ -343,6 +350,7 @@ struct ContentView: View {
                         Spacer(minLength: 0)
 
                         coverArt
+                            .gesture(collapseDragGesture)
 
                         VStack(spacing: 4) {
                             Text(playerMessage)
@@ -394,7 +402,33 @@ struct ContentView: View {
 
             Spacer()
         }
+        // 顶部整条都可下滑收起（不只是箭头），命中区域大一些更好按。
+        .contentShape(Rectangle())
         .padding(.bottom, 8)
+    }
+
+    /// 下滑收起播放器的手势。跟着手指走，松手时按位移和速度决定收起还是弹回。
+    /// 只挂在不滚动的区域（收起条、封面），否则会和 ScrollView 抢手势。
+    private var collapseDragGesture: some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                // 只跟随向下的位移；向上拖不动，免得把播放页拉出屏幕。
+                dragOffset = max(0, value.translation.height)
+            }
+            .onEnded { value in
+                let shouldCollapse = value.translation.height > 120
+                    || value.predictedEndTranslation.height > 250
+                if shouldCollapse {
+                    withAnimation(.easeInOut) {
+                        isPlayerMinimized = true
+                        dragOffset = 0
+                    }
+                } else {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.8)) {
+                        dragOffset = 0
+                    }
+                }
+            }
     }
 
     private var coverArt: some View {
