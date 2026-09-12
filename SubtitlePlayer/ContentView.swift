@@ -258,7 +258,9 @@ struct ContentView: View {
                 audioPlayer?.rate = Float(newRate)
             }
         }
-        .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
+        // 0.25s 而非 0.1s：currentTime 是顶层 @State，每次写入都会重算整个 body（含音乐库）。
+        // 字幕与进度条在 250ms 粒度下观感无差别，而重绘次数降到原来的 2/5。
+        .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in
             // 睡眠定时器到点则暂停。
             if let end = sleepTimerEnd, Date() >= end {
                 sleepTimerEnd = nil
@@ -269,10 +271,13 @@ struct ContentView: View {
                 return
             }
 
-            currentTime = audioPlayer.currentTime
+            let playing = audioPlayer.isPlaying
+            // 暂停时进度不会变，写它只会白白触发重绘。
+            if playing {
+                currentTime = audioPlayer.currentTime
+            }
 
             // 播放状态变化（如自然播完）时同步锁屏信息。
-            let playing = audioPlayer.isPlaying
             if playing != isPlaying {
                 isPlaying = playing
                 updateNowPlayingInfo()
@@ -280,12 +285,12 @@ struct ContentView: View {
 
                 // 自然播放结束：上一拍还在播、且已接近片尾 → 按播放模式连播。
                 // （AVAudioPlayer 播完会把 currentTime 重置，故用上一拍的进度判断。）
-                if !playing, duration > 0, lastPlayingTime >= duration - 0.6 {
+                if !playing, duration > 0, lastPlayingTime >= duration - 0.9 {
                     handleTrackFinished()
                 }
             }
 
-            if audioPlayer.isPlaying {
+            if playing {
                 lastPlayingTime = audioPlayer.currentTime
             }
         }
@@ -698,6 +703,7 @@ struct ContentView: View {
         // 旧的隐藏标记不再有用（demo 已彻底移除），顺手清掉。
         UserDefaults.standard.removeObject(forKey: "hideDemoTrack")
         UserDefaults.standard.set(true, forKey: cleanupKey)
+        DocumentsIndex.shared.refresh()
     }
 
     private func loadAudio(from url: URL) {
@@ -793,6 +799,7 @@ struct ContentView: View {
         let destinationURL = uniqueFileURL(in: documentsURL, fileName: url.lastPathComponent)
         do {
             try FileManager.default.copyItem(at: url, to: destinationURL)
+            DocumentsIndex.shared.refresh()
         } catch {
             return
         }
@@ -835,6 +842,7 @@ struct ContentView: View {
                 fileName: sourceURL.lastPathComponent
             )
             try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+            DocumentsIndex.shared.refresh()
 
             if let currentAudioURL,
                currentAudioURL.deletingPathExtension().lastPathComponent == sourceURL.deletingPathExtension().lastPathComponent {
@@ -1430,7 +1438,8 @@ struct AudioFilesView: View {
 
     @ViewBuilder
     private func albumThumbnail(for album: Album) -> some View {
-        if let cover = albumStore.coverImage(for: album) {
+        // 只要 44 点的缩略图：传 maxSide 让缓存存缩放后的小图，别把原图整张解码进内存。
+        if let cover = albumStore.coverImage(for: album, maxSide: 44) {
             Image(uiImage: cover)
                 .resizable()
                 .scaledToFill()

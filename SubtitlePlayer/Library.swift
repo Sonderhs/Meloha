@@ -827,6 +827,8 @@ struct Album: Identifiable, Codable, Equatable {
 let audioFileExtensions = ["mp3", "m4a", "wav", "aac", "aiff"]
 
 /// 列出 Documents 内所有音频，按名称排序。
+/// 走 DocumentsIndex 的内存快照：这个函数会在 body 里被调用（如 uncategorizedURLs），
+/// 每次真去扫目录会让列表随播放进度反复卡顿。
 func documentsAudioURLs() -> [URL] {
     guard let documentsURL = FileManager.default.urls(
         for: .documentDirectory,
@@ -835,15 +837,9 @@ func documentsAudioURLs() -> [URL] {
         return []
     }
 
-    let files = (try? FileManager.default.contentsOfDirectory(
-        at: documentsURL,
-        includingPropertiesForKeys: [.isRegularFileKey],
-        options: [.skipsHiddenFiles]
-    ))?.filter { audioFileExtensions.contains($0.pathExtension.lowercased()) } ?? []
-
-    return files.sorted {
-        $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
-    }
+    return DocumentsIndex.shared.audioFileNames
+        .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        .map { documentsURL.appendingPathComponent($0) }
 }
 
 /// 支持的字幕扩展名，顺序即匹配优先级：SRT → VTT → LRC。
@@ -906,6 +902,7 @@ func importSubtitleToDocuments(from sourceURL: URL, renameToMatch audioURL: URL?
 
     do {
         try FileManager.default.copyItem(at: sourceURL, to: destination)
+        DocumentsIndex.refreshSoon()
         return destination.lastPathComponent
     } catch {
         // 同 importAudioToDocuments：云端占位符直接拷会失败，用协调读取兜底。
@@ -922,17 +919,20 @@ func importSubtitleToDocuments(from sourceURL: URL, renameToMatch audioURL: URL?
                 copied = false
             }
         }
+        if copied { DocumentsIndex.refreshSoon() }
         return copied ? destination.lastPathComponent : nil
     }
 }
 
 /// 歌曲行尾的字幕状态标记：已配字幕显示蓝色实心气泡 + 格式，未配显示灰色空心气泡。
+/// 走 DocumentsIndex 查缓存，不在 body 里碰文件系统 —— 否则列表每行每帧要查 3 次。
 struct SubtitleBadge: View {
     let audioURL: URL
 
+    @ObservedObject private var index = DocumentsIndex.shared
+
     var body: some View {
-        if let subtitleURL = matchingSubtitleURL(for: audioURL) {
-            let format = subtitleURL.pathExtension.uppercased()
+        if let format = index.subtitleFormat(for: audioURL) {
             HStack(spacing: 4) {
                 Image(systemName: "captions.bubble.fill")
                 Text(format)
@@ -975,6 +975,7 @@ func importAudioToDocuments(from sourceURL: URL) -> String? {
 
     do {
         try FileManager.default.copyItem(at: sourceURL, to: destination)
+        DocumentsIndex.refreshSoon()
         return destination.lastPathComponent
     } catch {
         // 直接拷贝失败：文件很可能在 iCloud / 第三方云盘、本地只有占位符（深层、较老的文件
@@ -993,6 +994,7 @@ func importAudioToDocuments(from sourceURL: URL) -> String? {
                 copied = false
             }
         }
+        if copied { DocumentsIndex.refreshSoon() }
         return copied ? destination.lastPathComponent : nil
     }
 }
@@ -1124,12 +1126,15 @@ final class AlbumStore: ObservableObject {
         if let documentsURL = documentsDirectory {
             if let name = album.coverFileName {
                 try? FileManager.default.removeItem(at: documentsURL.appendingPathComponent(name))
+                CoverImageCache.shared.invalidate(fileName: name)
             }
             for name in album.imageList {
                 try? FileManager.default.removeItem(at: documentsURL.appendingPathComponent(name))
+                CoverImageCache.shared.invalidate(fileName: name)
             }
         }
         albums.removeAll { $0.id == album.id }
+        DocumentsIndex.shared.refresh()
         save()
     }
 
@@ -1143,6 +1148,9 @@ final class AlbumStore: ObservableObject {
         let name = "cover-\(album.id.uuidString).jpg"
         try? data.write(to: documentsURL.appendingPathComponent(name), options: .atomic)
         albums[index].coverFileName = name
+        // 文件名固定（按专辑 id），换封面必须清掉旧的解码缓存，否则仍显示旧图。
+        CoverImageCache.shared.invalidate(fileName: name)
+        DocumentsIndex.shared.refresh()
         save()
     }
 
@@ -1152,18 +1160,19 @@ final class AlbumStore: ObservableObject {
         }
         if let name = albums[index].coverFileName, let documentsURL = documentsDirectory {
             try? FileManager.default.removeItem(at: documentsURL.appendingPathComponent(name))
+            CoverImageCache.shared.invalidate(fileName: name)
         }
         albums[index].coverFileName = nil
+        DocumentsIndex.shared.refresh()
         save()
     }
 
-    func coverImage(for album: Album) -> UIImage? {
-        guard let name = album.coverFileName,
-              let documentsURL = documentsDirectory,
-              let data = try? Data(contentsOf: documentsURL.appendingPathComponent(name)) else {
-            return nil
-        }
-        return UIImage(data: data)
+    /// 专辑封面。`maxSide` 是显示尺寸（点），解码后按此缩放并缓存 ——
+    /// 列表缩略图只有 44 点，直接全尺寸解码原图是列表卡顿的主因。
+    /// 播放器要用大图时传更大的值（如 600）。
+    func coverImage(for album: Album, maxSide: CGFloat = 600) -> UIImage? {
+        guard let name = album.coverFileName else { return nil }
+        return CoverImageCache.shared.image(named: name, maxSide: maxSide)
     }
 
     // MARK: 专辑图片集（与封面无关，纯内容图：歌词本、内页、乐谱等）
@@ -1182,6 +1191,7 @@ final class AlbumStore: ObservableObject {
             return
         }
         albums[index].imageList.append(name)
+        DocumentsIndex.shared.refresh()
         save()
     }
 
@@ -1189,17 +1199,16 @@ final class AlbumStore: ObservableObject {
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
         if let documentsURL = documentsDirectory {
             try? FileManager.default.removeItem(at: documentsURL.appendingPathComponent(fileName))
+            CoverImageCache.shared.invalidate(fileName: fileName)
         }
         albums[index].imageList.removeAll { $0 == fileName }
+        DocumentsIndex.shared.refresh()
         save()
     }
 
-    func image(named fileName: String) -> UIImage? {
-        guard let documentsURL = documentsDirectory,
-              let data = try? Data(contentsOf: documentsURL.appendingPathComponent(fileName)) else {
-            return nil
-        }
-        return UIImage(data: data)
+    /// 专辑图片集里的图。`maxSide` 同 coverImage：缩略图传小值，看大图传大值。
+    func image(named fileName: String, maxSide: CGFloat = 1600) -> UIImage? {
+        CoverImageCache.shared.image(named: fileName, maxSide: maxSide)
     }
 
     // MARK: 专辑内分组（只有一层）
@@ -1249,9 +1258,9 @@ final class AlbumStore: ObservableObject {
     /// 某个分组内的曲目（过滤掉已不在磁盘上的）。排序方式跟随所属专辑。
     func tracks(in group: AlbumGroup, sortedBy mode: AlbumSort = .manual) -> [URL] {
         guard let documentsURL = documentsDirectory else { return [] }
+        let index = DocumentsIndex.shared
         let urls = group.fileNames.compactMap { name -> URL? in
-            let url = documentsURL.appendingPathComponent(name)
-            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+            index.contains(name) ? documentsURL.appendingPathComponent(name) : nil
         }
         return Self.sorted(urls, by: mode)
     }
@@ -1344,6 +1353,8 @@ final class AlbumStore: ObservableObject {
     }
 
     /// 取某专辑内仍存在的音频文件 URL，按专辑当前的排序方式返回。
+    /// 存在性走 DocumentsIndex 的内存索引：这个方法在 body 里被反复调用，
+    /// 逐个 fileExists 会让列表每帧打出几十次系统调用。
     func tracks(in album: Album) -> [URL] {
         guard let documentsURL = FileManager.default.urls(
             for: .documentDirectory,
@@ -1351,9 +1362,9 @@ final class AlbumStore: ObservableObject {
         ).first else {
             return []
         }
+        let index = DocumentsIndex.shared
         let urls = album.fileNames.compactMap { name -> URL? in
-            let url = documentsURL.appendingPathComponent(name)
-            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+            index.contains(name) ? documentsURL.appendingPathComponent(name) : nil
         }
         return Self.sorted(urls, by: album.sortMode)
     }
@@ -1383,18 +1394,31 @@ final class AlbumStore: ObservableObject {
         url.deletingPathExtension().lastPathComponent
     }
 
+    /// 修改时间缓存。`sorted` 会在 body 里被反复调用，而 resourceValues 是真的文件 I/O ——
+    /// 不缓存的话「按导入时间排序」的专辑每次重绘都要把整张专辑的文件属性读一遍。
+    /// 文件被替换后时间会变，但缓存不会自知，所以在索引刷新时统一清空（见 clearFileAttributeCaches）。
+    private static var modificationDateCache: [String: Date] = [:]
+
     private static func modificationDate(of url: URL) -> Date {
-        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
-            ?? .distantPast
+        if let cached = modificationDateCache[url.path] { return cached }
+        let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
+            .contentModificationDate) ?? .distantPast
+        modificationDateCache[url.path] = date
+        return date
+    }
+
+    /// 文件有增删改时清掉属性类缓存（修改时间、时长）。由 DocumentsIndex.refresh() 调用。
+    static func clearFileAttributeCaches() {
+        modificationDateCache.removeAll()
+        durationCache.removeAll()
     }
 
     /// 时长缓存：读时长要解析文件头，歌一多每次排序都读会明显卡顿。
-    /// 键用「路径 + 修改时间」，文件被替换后能自动失效。
+    /// 随索引刷新一并清空（见 clearFileAttributeCaches）。
     private static var durationCache: [String: TimeInterval] = [:]
 
     private static func cachedDuration(of url: URL) -> TimeInterval {
-        let key = "\(url.path)|\(modificationDate(of: url).timeIntervalSince1970)"
-        if let cached = durationCache[key] { return cached }
+        if let cached = durationCache[url.path] { return cached }
         // AVAudioFile 只读文件头，比 AVAsset 异步加载轻，够排序用。
         let seconds: TimeInterval
         if let file = try? AVAudioFile(forReading: url), file.fileFormat.sampleRate > 0 {
@@ -1402,7 +1426,7 @@ final class AlbumStore: ObservableObject {
         } else {
             seconds = 0
         }
-        durationCache[key] = seconds
+        durationCache[url.path] = seconds
         return seconds
     }
 
@@ -1936,7 +1960,8 @@ struct AlbumDetailView: View {
 
     private func thumbnail(for name: String) -> some View {
         Group {
-            if let image = albumStore.image(named: name) {
+            // 88 点的缩略图，别整张解码。
+            if let image = albumStore.image(named: name, maxSide: 88) {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
@@ -2152,7 +2177,8 @@ struct AlbumDetailView: View {
 
     @ViewBuilder
     private func coverView(for album: Album) -> some View {
-        if let cover = albumStore.coverImage(for: album) {
+        // 详情页封面显示 150 点，给 2× 余量。
+        if let cover = albumStore.coverImage(for: album, maxSide: 300) {
             Image(uiImage: cover)
                 .resizable()
                 .scaledToFill()
@@ -2333,6 +2359,10 @@ final class SubtitleImportCoordinator: ObservableObject {
     /// 处理选中的字幕文件：同名音频存在的直接落地，找不到的排队等用户指定。
     /// 返回要显示的 toast 文本（没有则 nil）。
     func handlePicked(_ urls: [URL]) -> String? {
+        // 先同步刷新一次索引：导入音频走的是 refreshSoon()，若刚导完音频紧接着导字幕，
+        // 排队中的异步刷新可能还没跑，同名判定会读到旧快照而误判「找不到同名音频」。
+        DocumentsIndex.shared.refresh()
+
         // 同名判定按全库来：字幕可能对应专辑外的音频，这种情况也该直接落地。
         let audioBaseNames = Set(
             documentsAudioURLs().map { $0.deletingPathExtension().lastPathComponent }
@@ -2603,6 +2633,7 @@ struct UncategorizedView: View {
         for u in urlsToDelete {
             try? FileManager.default.removeItem(at: u)
         }
+        DocumentsIndex.shared.refresh()
         reload()
     }
 }
