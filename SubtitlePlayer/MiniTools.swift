@@ -12,6 +12,49 @@
 
 import SwiftUI
 
+// MARK: - 从播放页打开的小游戏
+
+/// 播放页控制栏的小游戏入口。三个游戏共用一个 `.sheet(item:)`，各自带导航栏与「完成」。
+enum MiniGame: String, Identifiable {
+    case dice
+    case cards
+    case lottery
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .dice: return "掷骰子"
+        case .cards: return "抽纸牌"
+        case .lottery: return "抽签"
+        }
+    }
+}
+
+/// 把小游戏包成可从 sheet 呈现的形式（带标题栏和关闭按钮）。
+struct MiniGameSheet: View {
+    let game: MiniGame
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                switch game {
+                case .dice: DiceRollerView()
+                case .cards: CardDrawView()
+                case .lottery: LotteryView()
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - 掷骰子
 
 struct DiceRollerView: View {

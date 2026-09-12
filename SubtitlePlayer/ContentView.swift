@@ -30,6 +30,8 @@ struct ContentView: View {
     @State private var playerMessage = "还没有选择音频"
     /// 下滑收起播放器时的实时位移（0 表示未拖动）。
     @State private var dragOffset: CGFloat = 0
+    /// 当前从播放页打开的小游戏（nil 表示没开）。
+    @State private var activeMiniGame: MiniGame?
     /// 内嵌元数据里的艺术家/社团名（无则 nil），显示在标题下方。
     @State private var embeddedArtist: String?
     @State private var subtitles: [SubtitleLine] = []
@@ -319,6 +321,12 @@ struct ContentView: View {
                 lyricsText: subtitles.map(\.text).joined(separator: "\n")
             )
         }
+        // 小游戏挂独立节点：这个视图上已经叠了多个 sheet，同节点再加容易互相顶掉。
+        .background(
+            Color.clear.sheet(item: $activeMiniGame) { game in
+                MiniGameSheet(game: game)
+            }
+        )
         .onOpenURL { url in
             importIncomingFile(url)
         }
@@ -695,6 +703,30 @@ struct ContentView: View {
                     subtitleStatus = "导入字幕失败"
                 }
             }
+
+            // 小游戏：听着音声顺手掷个骰子/抽张牌，不用收起播放器回音乐库。
+            Menu {
+                Button {
+                    activeMiniGame = .dice
+                } label: {
+                    Label("掷骰子", systemImage: "dice.fill")
+                }
+                Button {
+                    activeMiniGame = .cards
+                } label: {
+                    Label("抽纸牌", systemImage: "suit.spade.fill")
+                }
+                Button {
+                    activeMiniGame = .lottery
+                } label: {
+                    Label("抽签", systemImage: "wand.and.stars")
+                }
+            } label: {
+                Image(systemName: "dice")
+                    .font(.title3)
+                    .frame(maxWidth: .infinity)
+            }
+            .accessibilityLabel("小游戏")
 
             if pipController.isSupported {
                 Button {
