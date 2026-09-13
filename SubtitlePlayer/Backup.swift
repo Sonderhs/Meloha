@@ -26,6 +26,19 @@ import Foundation
 import Combine
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
+
+// MARK: - 文件类型
+
+/// 备份文件的类型。在 Info.plist 的 `UTExportedTypeDeclarations` 里声明，
+/// 这里按标识符取回来。
+///
+/// 必须声明、不能只靠 `.data` 兜：未声明的扩展名在系统里只会解析成动态类型
+/// （`dyn.xxxx`），「文件」选择器对这种类型的过滤很严，表现就是备份文件灰掉选不中。
+nonisolated let backupContentType: UTType =
+    UTType("com.hansen.SubtitlePlayer.backup")
+    ?? UTType(filenameExtension: "melohabk", conformingTo: .data)
+    ?? .data
 
 // MARK: - 容器格式
 
@@ -274,6 +287,38 @@ nonisolated enum BackupManager {
     static func restore(
         from url: URL,
         progress: ProgressHandler? = nil
+    ) throws {
+        do {
+            try restoreContents(at: url, progress: progress)
+        } catch let error as BackupError {
+            // 只有「打不开」才值得重试：文件很可能在 iCloud / 第三方云盘，本地只是占位符
+            // （footer 里还在建议用户存到 iCloud，所以这条路径一定会被走到）。
+            // 用 NSFileCoordinator 协调读取会先触发下载再给出稳定快照。
+            // 格式错、空间不足之类的错误直接抛出去，重试没有意义。
+            guard case .corrupted(let detail) = error, detail == "无法打开文件" else { throw error }
+
+            var coordinatorError: NSError?
+            var inner: Error?
+            var attempted = false
+            NSFileCoordinator().coordinate(
+                readingItemAt: url, options: [], error: &coordinatorError
+            ) { readURL in
+                attempted = true
+                do {
+                    try restoreContents(at: readURL, progress: progress)
+                } catch {
+                    inner = error
+                }
+            }
+            if let inner { throw inner }
+            if !attempted { throw error }
+        }
+    }
+
+    /// 真正读取并恢复。`url` 必须是当下可直接打开的路径。
+    private static func restoreContents(
+        at url: URL,
+        progress: ProgressHandler?
     ) throws {
         guard let documentsURL else { throw BackupError.documentsUnavailable }
 
@@ -558,9 +603,13 @@ final class BackupTaskRunner: ObservableObject {
 
         let report = makeProgressReporter(for: .import)
 
+        // security scope 必须在这里（选择器回调所在的同步上下文）就拿到，
+        // 不能推迟到 Task 里 —— 那时回调已经返回，作用域可能已经失效。
+        // 现在的调用方用 asCopy 拿到的是本地副本、本就不需要 scope，
+        // 但保留这层兜底，免得以后换成别的来源时静默读不到。
+        let accessing = url.startAccessingSecurityScopedResource()
+
         task = Task {
-            // 从「文件」选来的 URL 需要 security scope 才能读。
-            let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
             do {

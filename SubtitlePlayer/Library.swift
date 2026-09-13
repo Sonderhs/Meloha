@@ -388,8 +388,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            // 导出面板挂在独立节点：这个视图上已经有 fileImporter 和 alert，
-            // 同节点再叠 sheet 容易互相顶掉。
+            // 导出面板挂在独立节点：这个视图上已经有 alert，同节点再叠 sheet 会互相顶掉。
             .background(
                 Color.clear.sheet(item: $backup.exportedFile) { file in
                     BackupExportPicker(url: file.url) { saved in
@@ -399,21 +398,29 @@ struct SettingsView: View {
                     }
                 }
             )
-            .fileImporter(
-                isPresented: $showImporter,
-                // 新备份是 .melohabk（无注册 UTType，按 data 匹配），旧备份是 .json。
-                allowedContentTypes: [.data, .json]
-            ) { result in
-                guard case .success(let url) = result else { return }
-                backup.restore(from: url) {
-                    // 恢复换掉了大批文件：索引与封面缓存全部作废。
-                    DocumentsIndex.shared.refresh()
-                    CoverImageCache.shared.removeAll()
-                    albumStore.reload()
-                    backgroundStore.reload()
-                    backupMessage = "导入成功，已恢复数据"
+            // 导入面板同样挂独立节点，且用 UIKit 选择器而非 .fileImporter ——
+            // 理由见 AudioDocumentPicker 的注释（设置页是 sheet 呈现的，
+            // SwiftUI 的 fileImporter 在这种层级里回调会被吞）。
+            .background(
+                Color.clear.sheet(isPresented: $showImporter) {
+                    AudioDocumentPicker(
+                        isPresented: $showImporter,
+                        // 备份是自有类型；旧备份是 .json。asCopy 拿到的是本地副本，
+                        // 不必再自己处理 security scope 和 iCloud 占位符。
+                        contentTypes: [backupContentType, .json]
+                    ) { urls in
+                        guard let url = urls.first else { return }
+                        backup.restore(from: url) {
+                            // 恢复换掉了大批文件：索引与封面缓存全部作废。
+                            DocumentsIndex.shared.refresh()
+                            CoverImageCache.shared.removeAll()
+                            albumStore.reload()
+                            backgroundStore.reload()
+                            backupMessage = "导入成功，已恢复数据"
+                        }
+                    }
                 }
-            }
+            )
             .alert("提示", isPresented: Binding(
                 get: { backupMessage != nil },
                 set: { if !$0 { backupMessage = nil } }

@@ -18,7 +18,7 @@
 - `Metronome.swift`：节拍器引擎 `Metronome` + 界面 `MetronomeView`。
 - `MiniTools.swift`：小工具子页面 —— `DiceRollerView`（掷骰子）/ `CardDrawView`+`PlayingCard`（抽纸牌）/ `LotteryView`（抽签）。
 - `AudioTrimmer.swift`：音频裁剪 —— `trimAudio()` 引擎 + `parseTimeInput()`/`formatTrimTime()` + `AudioTrimPickerView`（选文件）→ `AudioTrimView`（裁剪界面）。
-- `Backup.swift`：备份导出/导入。自定义流式容器（魔数 + 内容 + 尾部清单），`BackupManager` 负责读写、`BackupTaskRunner` 管进度/取消、`BackupExportPicker` 递文件给系统。旧 JSON 备份仍可导入。
+- `Backup.swift`：备份导出/导入。自定义流式容器（魔数 + 内容 + 尾部清单），`BackupManager` 负责读写、`BackupTaskRunner` 管进度/取消、`BackupExportPicker` 递文件给系统，`backupContentType` 是 `.melohabk` 的已声明类型。旧 JSON 备份仍可导入。
 - `ChatBot.swift` / `ChatView.swift`：本地 MLX 聊天机器人（控制器 + 界面）。
 - `SubtitlePiP.swift`：画中画字幕渲染。
 - `Info.plist`（物理文件，位于 SRCROOT）：后台音频/PiP 的 `UIBackgroundModes` 必须写在这（见记忆）。
@@ -98,7 +98,20 @@ xcodebuild -project SubtitlePlayer.xcodeproj -scheme SubtitlePlayer -sdk iphoneo
 10. **搬大文件时循环里必须套 `autoreleasepool`**：`FileHandle.read(upToCount:)` 返回的是桥接来的 `NSData`，进当前 autorelease pool，而循环中途不排空。少了它，"流式"读 300MB 会实打实攒下 300MB 匿名内存（实测 301.3 MB → 加上后 1.2 MB）。这是导出备份闪退的第二个原因。
 11. **量内存别看 `resident_size`**：它把文件页缓存（干净页、系统随时可回收）也算进去，流式搬运会显示成与数据等大，看不出问题。iOS 的 jetsam 看的是 `phys_footprint`，而定位泄漏要看 `task_vm_info.internal`（匿名内存）。
 12. **`UInt64` 减法会 trap**：从文件读来的长度/偏移先校验再参与算术。写成 `fileSize - footer - manifestLength` 或 `reduce(+)`、`Int64(totalBytes)`，遇到坏备份就是直接闪退而不是报错。已在 `restoreStreaming` 里改成加法比较 + `addingReportingOverflow`。
-13. **MLX 聊天机器人**：3 个 SPM 依赖 + Metal 工具链 + 只能真机 + 跳过插件/宏验证；国内下载走 `HF_ENDPOINT` 镜像；模型缓存持久化只设 `HF_HOME` 指向 `Library/hf-models`。（记忆：`mlx-local-chatbot-setup`）
+13. **自定义扩展名必须在 Info.plist 里声明类型**，否则「文件」选择器里是灰的选不中。未声明的扩展名在系统里只解析成动态类型（`dyn.xxxx`），光在 `allowedContentTypes` 里写 `.data` 不管用。`.melohabk` 声明成 `com.hansen.SubtitlePlayer.backup`（`UTExportedTypeDeclarations` + `CFBundleDocumentTypes`）后才正常。
+    - ⚠️ 验证陷阱：在 macOS 上用 `UTType(filenameExtension:)` 测会显示它 conform 到 `.data`，看着没问题 —— 但那测的是本地文件类型解析，**不是 iOS 选择器的过滤行为，结论不能拿来当依据**。这一条就是这么漏过去的。
+    - 改了 Info.plist 的类型声明后**必须重装 App**（⌘R）才生效，类型是装机时注册的。
+14. **MLX 聊天机器人**：3 个 SPM 依赖 + Metal 工具链 + 只能真机 + 跳过插件/宏验证；国内下载走 `HF_ENDPOINT` 镜像；模型缓存持久化只设 `HF_HOME` 指向 `Library/hf-models`。（记忆：`mlx-local-chatbot-setup`）
+
+### ⚠️ 关于「测过了」的边界（2.1 的教训）
+
+2.1 发出去的备份功能导入不了。往返逻辑有 25 项测试、内存也量过，但**全部集中在纯 Foundation 那一层**；真正坏掉的三处都在没测的那层，且**每一处都违反了上面已经写下的坑**：
+
+- `.fileImporter` 和 `.alert` 叠在同一节点（坑 1、2）
+- 读外部文件没有 `NSFileCoordinator`（坑 3）
+- 自定义扩展名没声明类型（坑 13，当时还不存在）
+
+教训：坑列表要在**改完之后逐条对一遍**，不能只在写的时候凭印象避开。UI 层（presentation 修饰符、文件选择、类型注册、security scope）在 Mac 上一行都测不到，属于「只能真机验」的部分 —— 发布前必须真机跑一次完整往返，把「没测过」写进交付说明不等于尽到责任。
 
 ## 五、待办 / 提过但用户没定的事
 
