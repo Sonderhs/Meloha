@@ -334,13 +334,16 @@ struct ContentView: View {
     }
 
     private var libraryView: some View {
-        AudioFilesView(albumStore: albumStore, backgroundStore: backgroundStore, showsDoneButton: false) { urls, index, cover in
-            playTrack(at: index, in: urls, fallbackCover: cover)
-            withAnimation(.easeInOut) {
-                isPlayerMinimized = false
+        // 音乐库包含 NavigationStack：直接划分可用高度，让所有 push 的子页
+        // 都在播放器上方布局，不依赖外层 safeAreaInset 向导航页面传递底部留白。
+        VStack(spacing: 0) {
+            AudioFilesView(albumStore: albumStore, backgroundStore: backgroundStore, showsDoneButton: false) { urls, index, cover in
+                playTrack(at: index, in: urls, fallbackCover: cover)
+                withAnimation(.easeInOut) {
+                    isPlayerMinimized = false
+                }
             }
-        }
-        .safeAreaInset(edge: .bottom) {
+
             miniPlayerBar
                 .padding(.horizontal)
                 .padding(.vertical, 8)
