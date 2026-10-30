@@ -26,12 +26,15 @@ jobs:
         run: |
           set -o pipefail
           bash build-ipa.sh 2>&1 | tee build-ipa.log
+          mkdir -p artifacts
+          cp ../dist/Meloha.ipa artifacts/Meloha.ipa
+          unzip -t artifacts/Meloha.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: Meloha-unsigned-ipa
-          path: ../dist/Meloha.ipa
+          path: artifacts/Meloha.ipa
           if-no-files-found: error
           retention-days: 30
 
