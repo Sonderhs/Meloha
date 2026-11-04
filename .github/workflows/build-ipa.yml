@@ -23,8 +23,13 @@ jobs:
 
       - name: Check folder import
         run: |
-          xcrun swiftc SubtitlePlayer/FolderImport.swift tests/FolderImportChecks.swift -o "$RUNNER_TEMP/folder-import-checks"
+          xcrun swiftc SubtitlePlayer/AlbumModels.swift SubtitlePlayer/LibraryStorage.swift SubtitlePlayer/FolderImport.swift tests/FolderImportChecks.swift -o "$RUNNER_TEMP/folder-import-checks"
           "$RUNNER_TEMP/folder-import-checks"
+
+      - name: Check library storage and backups
+        run: |
+          xcrun swiftc SubtitlePlayer/AlbumModels.swift SubtitlePlayer/LibraryStorage.swift SubtitlePlayer/BackupArchive.swift tests/LibraryStorageChecks.swift -o "$RUNNER_TEMP/library-storage-checks"
+          "$RUNNER_TEMP/library-storage-checks"
 
       - name: Build and package IPA
         shell: bash

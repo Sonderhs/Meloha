@@ -41,8 +41,9 @@ struct FolderImportChecks {
         precondition(result.subtitleCount == 3)
         precondition(result.groups.count == 2)
         precondition(result.images.count == 1 && result.cover != nil)
-        precondition(result.tracks.contains("01 ゲーム (2).mp3"))
-        let paired = try String(contentsOf: documents.appendingPathComponent("01 ゲーム (2).lrc"), encoding: .utf8)
+        let first = result.tracks.first { URL(fileURLWithPath: $0).lastPathComponent == "01 ゲーム.mp3" }!
+        precondition(first.hasPrefix("Albums/"))
+        let paired = try String(contentsOf: documents.appendingPathComponent(first).deletingPathExtension().appendingPathExtension("lrc"), encoding: .utf8)
         let preserved = try String(contentsOf: existing, encoding: .utf8)
         precondition(paired == "[00:00.00]subtitle-one")
         precondition(preserved == "keep-existing")
@@ -57,8 +58,13 @@ struct FolderImportChecks {
         }.value
         precondition(Set(result.tracks).isDisjoint(with: again.tracks))
         precondition(again.subtitleCount == 3)
+        precondition(result.tracks.map { URL(fileURLWithPath: $0).lastPathComponent } == again.tracks.map { URL(fileURLWithPath: $0).lastPathComponent })
+        let skipped = try await Task.detached {
+            try FolderImportEngine.run(folder: folder, documents: documents, duplicatePolicy: .skip) { _, _ in }
+        }.value
+        precondition(skipped.tracks.count == 3 && skipped.subtitleCount == 3)
         // Cancel after the first file landed, before the next audio copy; everything is rolled back.
-        let before = Set(try fm.contentsOfDirectory(atPath: documents.path))
+        let before = Set(try LibraryStorage.files(in: documents))
         let cancelled = Task.detached {
             try FolderImportEngine.run(folder: folder, documents: documents) { status, _ in
                 if status.contains("CD1/track.mp3") {
@@ -70,7 +76,7 @@ struct FolderImportChecks {
             _ = try await cancelled.value
             fatalError("Cancellation was ignored")
         } catch is CancellationError {}
-        let after = Set(try fm.contentsOfDirectory(atPath: documents.path))
+        let after = Set(try LibraryStorage.files(in: documents))
         precondition(after == before)
         let empty = root.appendingPathComponent("Empty")
         try fm.createDirectory(at: empty, withIntermediateDirectories: true)

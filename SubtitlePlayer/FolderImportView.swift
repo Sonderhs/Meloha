@@ -13,7 +13,7 @@ final class FolderImportController: ObservableObject {
     @Published private(set) var issues: [String] = []
     private var worker: Task<FolderImportResult, Error>?
 
-    func start(_ folder: URL, store: AlbumStore) {
+    func start(_ folder: URL, store: AlbumStore, policy: DuplicateImportPolicy) {
         guard !running else { return }
         running = true
         finished = false
@@ -31,7 +31,7 @@ final class FolderImportController: ObservableObject {
             }
         }
         let job = Task.detached(priority: .userInitiated) {
-            try FolderImportEngine.run(folder: folder, documents: documents, progress: report)
+            try FolderImportEngine.run(folder: folder, documents: documents, duplicatePolicy: policy, progress: report)
         }
         worker = job
         Task {
@@ -72,6 +72,7 @@ struct FolderImportSheet: View {
     @ObservedObject var albumStore: AlbumStore
     @StateObject private var controller = FolderImportController()
     @State private var showPicker = false
+    @State private var duplicatePolicy: DuplicateImportPolicy = .keepBoth
 
     var body: some View {
         NavigationStack {
@@ -82,7 +83,15 @@ struct FolderImportSheet: View {
                     Label("同名字幕自动配对", systemImage: "captions.bubble")
                     Label("优先选用 cover、folder、artwork01 等封面，其余图片加入图片集", systemImage: "photo")
                 } footer: {
-                    Text("选择一个已解压的作品文件夹。支持 MP3、M4A、WAV、AAC、AIFF 和 SRT、VTT、LRC 字幕。同名文件自动改名；原文件保留。")
+                    Text("选择一个已解压的作品文件夹。支持 MP3、M4A、WAV、AAC、AIFF 和 SRT、VTT、LRC 字幕。不同专辑的同名音频保留原名；原文件保留。")
+                }
+                Section {
+                    Picker("同一专辑内出现同名音频", selection: $duplicatePolicy) {
+                        ForEach(DuplicateImportPolicy.allCases, id: \.self) { policy in
+                            Text(policy.label).tag(policy)
+                        }
+                    }
+                    .disabled(controller.running)
                 }
                 Section {
                     if controller.running {
@@ -125,7 +134,7 @@ struct FolderImportSheet: View {
                 Color.clear.sheet(isPresented: $showPicker) {
                     FolderDocumentPicker { url in
                         showPicker = false
-                        if let url { controller.start(url, store: albumStore) }
+                        if let url { controller.start(url, store: albumStore, policy: duplicatePolicy) }
                     }
                     .ignoresSafeArea()
                 }

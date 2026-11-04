@@ -637,131 +637,6 @@ struct LyricsView: View {
 
 // MARK: - 数据模型
 
-/// 专辑内曲目排序方式。存进 albums.json，每张专辑各自记住。
-enum AlbumSort: String, Codable, CaseIterable, Identifiable {
-    case nameAscending
-    case nameDescending
-    case dateAddedNewest
-    case dateAddedOldest
-    case durationShortest
-    case durationLongest
-    case manual
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .nameAscending: return "名称 A→Z"
-        case .nameDescending: return "名称 Z→A"
-        case .dateAddedNewest: return "导入时间（新→旧）"
-        case .dateAddedOldest: return "导入时间（旧→新）"
-        case .durationShortest: return "时长（短→长）"
-        case .durationLongest: return "时长（长→短）"
-        case .manual: return "手动排序"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .nameAscending, .nameDescending: return "textformat"
-        case .dateAddedNewest, .dateAddedOldest: return "clock"
-        case .durationShortest, .durationLongest: return "timer"
-        case .manual: return "hand.draw"
-        }
-    }
-}
-
-/// 专辑内的分组（如 CD1/CD2、原曲/伴奏）。只有一层，分组里不能再套分组。
-struct AlbumGroup: Identifiable, Codable, Equatable {
-    var id: UUID
-    var name: String
-    /// 本组的成员文件名。歌曲要么在某个组里，要么散在专辑根（不属于任何组）。
-    var fileNames: [String]
-
-    init(id: UUID = UUID(), name: String, fileNames: [String] = []) {
-        self.id = id
-        self.name = name
-        self.fileNames = fileNames
-    }
-}
-
-struct Album: Identifiable, Codable, Equatable {
-    var id: UUID
-    var name: String
-    /// 成员文件名（相对 Documents 的 lastPathComponent）。这是专辑的**全部**歌曲，
-    /// 分组只是给其中一部分打上归属，不重复存储也不改变这里的顺序。
-    var fileNames: [String]
-    /// 封面图文件名（相对 Documents），无封面时为 nil。
-    var coverFileName: String?
-    /// 专辑内分组。解码旧数据时为 nil，用 `groupList` 读取以免到处判空。
-    var groups: [AlbumGroup]?
-    /// 专辑图片集（歌词本拍照、内页、乐谱等），与封面无关。旧数据为 nil。
-    var imageFileNames: [String]?
-    /// 曲目排序方式。旧数据为 nil —— 用 `sortMode` 读取，默认按名称升序。
-    var sort: AlbumSort?
-    /// 备注（社团、声优、来源等自由文本）。参与专辑搜索。旧数据为 nil。
-    var note: String?
-    /// 标签（如「治愈」「已听完」）。一张专辑可有多个，参与搜索与筛选。旧数据为 nil。
-    var tags: [String]?
-
-    /// 标签列表（旧数据视为空）。
-    var tagList: [String] {
-        get { tags ?? [] }
-        set { tags = newValue.isEmpty ? nil : newValue }
-    }
-
-    /// 搜索用的可匹配文本：名称 + 备注 + 标签。
-    var searchableText: String {
-        ([name, note ?? ""] + tagList).joined(separator: " ")
-    }
-
-    /// 排序方式（旧数据默认按名称升序）。
-    var sortMode: AlbumSort {
-        get { sort ?? .nameAscending }
-        set { sort = newValue }
-    }
-
-    /// 分组列表（旧数据视为空）。
-    var groupList: [AlbumGroup] {
-        get { groups ?? [] }
-        set { groups = newValue.isEmpty ? nil : newValue }
-    }
-
-    /// 图片列表（旧数据视为空）。
-    var imageList: [String] {
-        get { imageFileNames ?? [] }
-        set { imageFileNames = newValue.isEmpty ? nil : newValue }
-    }
-
-    /// 不属于任何分组的歌（显示在分组上方）。
-    var ungroupedFileNames: [String] {
-        let grouped = Set(groupList.flatMap(\.fileNames))
-        return fileNames.filter { !grouped.contains($0) }
-    }
-
-    init(
-        id: UUID = UUID(),
-        name: String,
-        fileNames: [String] = [],
-        coverFileName: String? = nil,
-        groups: [AlbumGroup]? = nil,
-        imageFileNames: [String]? = nil,
-        sort: AlbumSort? = nil,
-        note: String? = nil,
-        tags: [String]? = nil
-    ) {
-        self.id = id
-        self.name = name
-        self.fileNames = fileNames
-        self.coverFileName = coverFileName
-        self.groups = groups
-        self.imageFileNames = imageFileNames
-        self.sort = sort
-        self.note = note
-        self.tags = tags
-    }
-}
-
 /// 音乐库识别的音频扩展名（导入、下载校验、分享打开都用这一份）。
 let audioFileExtensions = ["mp3", "m4a", "wav", "aac", "aiff"]
 
@@ -786,12 +661,12 @@ let subtitleFileExtensions = ["srt", "vtt", "lrc"]
 
 /// 查找与音频同名的字幕文件（同目录、仅扩展名不同），返回优先级最高的那个；都不存在返回 nil。
 func matchingSubtitleURL(for audioURL: URL) -> URL? {
-    let base = audioURL.deletingPathExtension()
+    let candidates = (try? FileManager.default.contentsOfDirectory(at: audioURL.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? []
+    let stem = LibraryStorage.key(audioURL.deletingPathExtension().lastPathComponent)
     for ext in subtitleFileExtensions {
-        let subtitleURL = base.appendingPathExtension(ext)
-        if FileManager.default.fileExists(atPath: subtitleURL.path) {
-            return subtitleURL
-        }
+        if let match = candidates.first(where: {
+            $0.pathExtension.lowercased() == ext && LibraryStorage.key($0.deletingPathExtension().lastPathComponent) == stem
+        }) { return match }
     }
     return nil
 }
@@ -807,60 +682,23 @@ var subtitleContentTypes: [UTType] {
 /// （音频 `song.mp3` + 字幕 `xxx.lrc` → `song.lrc`），从而被同名匹配规则找到。
 /// 返回落地后的文件名；失败返回 nil。
 func importSubtitleToDocuments(from sourceURL: URL, renameToMatch audioURL: URL? = nil) -> String? {
-    let canAccess = sourceURL.startAccessingSecurityScopedResource()
-    defer { if canAccess { sourceURL.stopAccessingSecurityScopedResource() } }
-
-    guard let documentsURL = try? FileManager.default.url(
-        for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true
-    ) else {
-        return nil
-    }
-
-    let ext = sourceURL.pathExtension
-    let fileName: String
-    if let audioURL {
-        // 与音频同名（只换扩展名）。已存在的同名字幕直接覆盖——用户就是要给这首歌配这份字幕。
-        fileName = audioURL.deletingPathExtension().lastPathComponent + "." + ext
-    } else {
-        fileName = sourceURL.lastPathComponent
-    }
-
-    var destination = documentsURL.appendingPathComponent(fileName)
-    if audioURL != nil {
-        try? FileManager.default.removeItem(at: destination)
-    } else if FileManager.default.fileExists(atPath: destination.path) {
-        let base = destination.deletingPathExtension().lastPathComponent
-        var number = 2
-        repeat {
-            destination = documentsURL
-                .appendingPathComponent("\(base) \(number)")
-                .appendingPathExtension(ext)
-            number += 1
-        } while FileManager.default.fileExists(atPath: destination.path)
-    }
-
+    let access = sourceURL.startAccessingSecurityScopedResource()
+    defer { if access { sourceURL.stopAccessingSecurityScopedResource() } }
+    guard let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+    let ext = sourceURL.pathExtension.lowercased()
+    let destination = audioURL?.deletingPathExtension().appendingPathExtension(ext)
+        ?? root.appendingPathComponent(sourceURL.lastPathComponent)
+    let staging = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: staging) }
     do {
-        try FileManager.default.copyItem(at: sourceURL, to: destination)
+        try FolderImportEngine.copy(sourceURL, to: staging)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging)
+        } else { try FileManager.default.moveItem(at: staging, to: destination) }
         DocumentsIndex.refreshSoon()
-        return destination.lastPathComponent
-    } catch {
-        // 同 importAudioToDocuments：云端占位符直接拷会失败，用协调读取兜底。
-        var copied = false
-        var coordinatorError: NSError?
-        NSFileCoordinator().coordinate(readingItemAt: sourceURL, options: [], error: &coordinatorError) { readURL in
-            do {
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    try? FileManager.default.removeItem(at: destination)
-                }
-                try FileManager.default.copyItem(at: readURL, to: destination)
-                copied = true
-            } catch {
-                copied = false
-            }
-        }
-        if copied { DocumentsIndex.refreshSoon() }
-        return copied ? destination.lastPathComponent : nil
-    }
+        return storageReference(destination)
+    } catch { return nil }
 }
 
 /// 歌曲行尾的字幕状态标记：已配字幕显示蓝色实心气泡 + 格式，未配显示灰色空心气泡。
@@ -889,7 +727,7 @@ struct SubtitleBadge: View {
 
 /// 把外部音频拷贝进 Documents，返回落地后的文件名（用于加入专辑等）；失败返回 nil。
 /// 若同名已存在，自动追加序号避免覆盖。
-func importAudioToDocuments(from sourceURL: URL) -> String? {
+func importAudioToDocuments(from sourceURL: URL, albumID: UUID? = nil) -> String? {
     let canAccess = sourceURL.startAccessingSecurityScopedResource()
     defer { if canAccess { sourceURL.stopAccessingSecurityScopedResource() } }
 
@@ -900,6 +738,11 @@ func importAudioToDocuments(from sourceURL: URL) -> String? {
     }
 
     var destination = documentsURL.appendingPathComponent(sourceURL.lastPathComponent)
+    if let albumID {
+        destination = documentsURL.appendingPathComponent(LibraryStorage.trackPath(albumID: albumID, name: sourceURL.lastPathComponent))
+        do { try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true) }
+        catch { return nil }
+    }
     if FileManager.default.fileExists(atPath: destination.path) {
         let ext = destination.pathExtension
         let base = destination.deletingPathExtension().lastPathComponent
@@ -915,7 +758,7 @@ func importAudioToDocuments(from sourceURL: URL) -> String? {
     do {
         try FileManager.default.copyItem(at: sourceURL, to: destination)
         DocumentsIndex.refreshSoon()
-        return destination.lastPathComponent
+        return storageReference(destination)
     } catch {
         // 直接拷贝失败：文件很可能在 iCloud / 第三方云盘、本地只有占位符（深层、较老的文件
         // 常被系统「优化存储」清到云端）。改用 NSFileCoordinator 协调读取，会先触发下载再
@@ -934,7 +777,7 @@ func importAudioToDocuments(from sourceURL: URL) -> String? {
             }
         }
         if copied { DocumentsIndex.refreshSoon() }
-        return copied ? destination.lastPathComponent : nil
+        return copied ? storageReference(destination) : nil
     }
 }
 
@@ -987,6 +830,10 @@ struct AudioDocumentPicker: UIViewControllerRepresentable {
 @MainActor
 final class AlbumStore: ObservableObject {
     @Published private(set) var albums: [Album] = []
+    @Published private(set) var isBusy = true
+    @Published private(set) var busyMessage = "正在读取音乐库…"
+    @Published var operationError: String?
+    @Published var operationMessage: String?
 
     private let storeURL: URL = {
         let documentsURL = FileManager.default.urls(
@@ -1000,28 +847,97 @@ final class AlbumStore: ObservableObject {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
     }
 
-    init() {
-        load()
-    }
+    init() { Task { await prepareLibrary() } }
 
-    /// 从磁盘重新载入专辑（导入备份后调用）。
     func reload() {
-        load()
+        guard !isBusy else { return }
+        isBusy = true
+        Task { await prepareLibrary() }
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: storeURL),
-              let decoded = try? JSONDecoder().decode([Album].self, from: data) else {
-            return
+    private func prepareLibrary() async {
+        guard let root = documentsDirectory else { isBusy = false; return }
+        let report: @Sendable (String) -> Void = { [weak self] message in
+            guard let store = self else { return }
+            Task { @MainActor in if store.isBusy { store.busyMessage = message } }
         }
-        albums = decoded
+        do {
+            albums = try await Task.detached(priority: .userInitiated) {
+                try LibraryStorage.recover(root: root)
+                let file = root.appendingPathComponent("albums.json")
+                let old = FileManager.default.fileExists(atPath: file.path)
+                    ? try JSONDecoder().decode([Album].self, from: Data(contentsOf: file)) : []
+                return try LibraryStorage.migrate(old, root: root, progress: report)
+            }.value
+            DocumentsIndex.shared.refresh()
+            NotificationCenter.default.post(name: .libraryFilesChanged, object: nil)
+        } catch { operationError = "音乐库整理未完成，原有数据已保留。\n" + error.localizedDescription }
+        isBusy = false
+    }
+
+    private func persist(_ updated: [Album]) {
+        do {
+            if let root = documentsDirectory { try LibraryStorage.recover(root: root) }
+            try JSONEncoder().encode(updated).write(to: storeURL, options: .atomic)
+            albums = updated
+        } catch { operationError = error.localizedDescription }
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(albums) else {
-            return
+        do {
+            if let root = documentsDirectory { try LibraryStorage.recover(root: root) }
+            try JSONEncoder().encode(albums).write(to: storeURL, options: .atomic)
         }
-        try? data.write(to: storeURL, options: .atomic)
+        catch { operationError = error.localizedDescription }
+    }
+
+    func togglePin(_ album: Album) {
+        guard !isBusy else { return }
+        var updated = albums
+        LibraryStorage.togglePin(album.id, in: &updated)
+        persist(updated)
+    }
+
+    func movePin(_ album: Album, by offset: Int) {
+        guard !isBusy else { return }
+        var updated = albums
+        LibraryStorage.movePin(album.id, by: offset, in: &updated)
+        persist(updated)
+    }
+
+    func deletionMessage(ids: Set<UUID>) -> String {
+        let selected = albums.filter { ids.contains($0.id) }
+        let retained = Set(albums.filter { !ids.contains($0.id) }.flatMap(\.fileNames).map(LibraryStorage.key))
+        let tracks = Set(selected.flatMap(\.fileNames).map(LibraryStorage.key))
+        let shared = tracks.intersection(retained).count
+        return "将删除 \(selected.count) 个专辑、\(tracks.count - shared) 首音频，以及对应字幕、封面和图片集。"
+            + (shared > 0 ? "\n另有 \(shared) 首仍被其他专辑引用，将予以保留。" : "")
+            + "\n删除后无法撤销，导入来源文件夹不受影响。"
+    }
+
+    func deleteAlbums(ids: Set<UUID>) {
+        guard !isBusy, !ids.isEmpty, let root = documentsDirectory else { return }
+        let snapshot = albums
+        isBusy = true
+        busyMessage = "正在删除专辑和文件…"
+        Task {
+            do {
+                let plan = try await Task.detached(priority: .userInitiated) {
+                    let plan = try LibraryStorage.deletionPlan(snapshot, ids: ids, root: root)
+                    try LibraryStorage.transact(root: root, next: plan.remaining, removals: plan.paths)
+                    return plan
+                }.value
+                albums = plan.remaining
+                CoverImageCache.shared.invalidateAll()
+                DocumentsIndex.shared.refresh()
+                NotificationCenter.default.post(name: .libraryFilesChanged, object: nil)
+                operationMessage = "已删除 \(plan.albumCount) 个专辑、\(plan.trackCount) 首音频"
+                if FileManager.default.fileExists(atPath: root.appendingPathComponent(".library-transaction").path) {
+                    operationMessage = "专辑已删除，部分文件将在下次启动时继续清理"
+                }
+            } catch { operationError = "删除未完成，已尝试恢复原有文件。\n" + error.localizedDescription }
+            isBusy = false
+        }
     }
 
     /// 设置备注与标签。标签去空白、去重、丢掉空项。
@@ -1062,7 +978,7 @@ final class AlbumStore: ObservableObject {
 
     /// Commit the album only after its files have landed and albums.json is saved successfully.
     func addImportedFolder(_ result: FolderImportResult) throws {
-        let album = Album(name: result.name, fileNames: result.tracks,
+        let album = Album(id: result.albumID, name: result.name, fileNames: result.tracks,
             coverFileName: result.cover,
             groups: result.groups.map { AlbumGroup(name: $0.name, fileNames: $0.fileNames) },
             imageFileNames: result.images, sort: .manual)
@@ -1073,23 +989,6 @@ final class AlbumStore: ObservableObject {
         DocumentsIndex.shared.refresh()
     }
 
-    func deleteAlbum(_ album: Album) {
-        // 一并删除封面与图片集文件（它们只属于这张专辑，留着就成了孤儿文件）。
-        if let documentsURL = documentsDirectory {
-            if let name = album.coverFileName {
-                try? FileManager.default.removeItem(at: documentsURL.appendingPathComponent(name))
-                CoverImageCache.shared.invalidate(fileName: name)
-            }
-            for name in album.imageList {
-                try? FileManager.default.removeItem(at: documentsURL.appendingPathComponent(name))
-                CoverImageCache.shared.invalidate(fileName: name)
-            }
-        }
-        albums.removeAll { $0.id == album.id }
-        DocumentsIndex.shared.refresh()
-        save()
-    }
-
     /// 设置专辑封面（图片数据写入 Documents）。
     func setCover(data: Data, for album: Album) {
         guard UIImage(data: data) != nil,
@@ -1097,7 +996,8 @@ final class AlbumStore: ObservableObject {
               let documentsURL = documentsDirectory else {
             return
         }
-        let name = "cover-\(album.id.uuidString).jpg"
+        let name = LibraryStorage.imagePath(albumID: album.id, name: "cover.jpg")
+        try? FileManager.default.createDirectory(at: documentsURL.appendingPathComponent(name).deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: documentsURL.appendingPathComponent(name), options: .atomic)
         albums[index].coverFileName = name
         // 文件名固定（按专辑 id），换封面必须清掉旧的解码缓存，否则仍显示旧图。
@@ -1136,7 +1036,8 @@ final class AlbumStore: ObservableObject {
               let documentsURL = documentsDirectory else {
             return
         }
-        let name = "albumimg-\(album.id.uuidString)-\(UUID().uuidString).jpg"
+        let name = LibraryStorage.imagePath(albumID: album.id)
+        try? FileManager.default.createDirectory(at: documentsURL.appendingPathComponent(name).deletingLastPathComponent(), withIntermediateDirectories: true)
         do {
             try data.write(to: documentsURL.appendingPathComponent(name), options: .atomic)
         } catch {
@@ -1387,7 +1288,7 @@ final class AlbumStore: ObservableObject {
     func setSort(_ mode: AlbumSort, for album: Album) {
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
         if mode == .manual, albums[index].sortMode != .manual {
-            let visible = tracks(in: album).map(\.lastPathComponent)
+            let visible = tracks(in: album).map { storageReference($0) }
             // 保留当前可见顺序，磁盘上已消失的文件名附在后面不丢。
             let missing = albums[index].fileNames.filter { !visible.contains($0) }
             albums[index].fileNames = visible + missing
@@ -1400,7 +1301,7 @@ final class AlbumStore: ObservableObject {
     /// 供「未分类」虚拟专辑使用，让删掉文件页后松散音频仍可被浏览、播放。
     func uncategorizedURLs() -> [URL] {
         let member = Set(albums.flatMap { $0.fileNames })
-        return documentsAudioURLs().filter { !member.contains($0.lastPathComponent) }
+        return documentsAudioURLs().filter { !member.contains(storageReference($0)) }
     }
 }
 
@@ -1413,6 +1314,8 @@ struct AlbumDetailView: View {
 
     @State private var showAddSongs = false
     @State private var showAudioImporter = false
+    @State private var pendingAudioImports: [URL] = []
+    @State private var showDuplicateAudioChoice = false
     @StateObject private var subtitleImport = SubtitleImportCoordinator()
     @State private var coverPickerItem: PhotosPickerItem?
     /// 封面来源：相册 / 「文件」。
@@ -1457,6 +1360,13 @@ struct AlbumDetailView: View {
     private func importLayer<V: View>(_ view: V) -> some View {
         dialogLayer(
             view
+                .background(
+                    Color.clear.confirmationDialog("专辑中有同名音频", isPresented: $showDuplicateAudioChoice, titleVisibility: .visible) {
+                        Button("跳过同名音频") { importPickedAudio(pendingAudioImports, policy: .skip) }
+                        Button("保留两份（文件名不变）") { importPickedAudio(pendingAudioImports, policy: .keepBoth) }
+                        Button("取消", role: .cancel) { pendingAudioImports = [] }
+                    }
+                )
                 .sheet(isPresented: $showAddSongs) {
                     if let album {
                         AddSongsView(albumID: album.id, albumStore: albumStore)
@@ -1625,20 +1535,31 @@ struct AlbumDetailView: View {
 
     private func handleImportedAudio(_ urls: [URL]) {
         guard let album else { return }
-        // 拷贝进 Documents 后直接加入本专辑，省去先进「文件」页再挑选。
-        let names = urls.compactMap { importAudioToDocuments(from: $0) }
-        if !names.isEmpty {
-            albumStore.addFiles(names, to: album)
+        var seen = Set(album.fileNames.map { LibraryStorage.key(($0 as NSString).lastPathComponent) })
+        let hasDuplicate = urls.contains { !seen.insert(LibraryStorage.key($0.lastPathComponent)).inserted }
+        if hasDuplicate {
+            pendingAudioImports = urls
+            showDuplicateAudioChoice = true
+        } else { importPickedAudio(urls, policy: .keepBoth) }
+    }
+
+    private func importPickedAudio(_ urls: [URL], policy: DuplicateImportPolicy) {
+        guard let album else { return }
+        var seen = Set(album.fileNames.map { LibraryStorage.key(($0 as NSString).lastPathComponent) })
+        var imported: [String] = []
+        var failed = 0
+        var skipped = 0
+        for url in urls {
+            let name = LibraryStorage.key(url.lastPathComponent)
+            if policy == .skip && seen.contains(name) { skipped += 1; continue }
+            if let reference = importAudioToDocuments(from: url, albumID: album.id) {
+                imported.append(reference)
+                seen.insert(name)
+            } else { failed += 1 }
         }
-        // 显式反馈：失败多半是文件在 iCloud 未下载，别再静默无反应。
-        let failed = urls.count - names.count
-        if failed > 0 {
-            toastMessage = names.isEmpty
-                ? "导入失败：文件可能在 iCloud 未下载，请先在「文件」中下载后重试"
-                : "已导入 \(names.count) 首，\(failed) 个失败（可能未下载到本机）"
-        } else if !names.isEmpty {
-            toastMessage = "已导入 \(names.count) 首"
-        }
+        albumStore.addFiles(imported, to: album)
+        toastMessage = "已导入 \(imported.count) 首，跳过 \(skipped) 首，失败 \(failed) 首"
+        pendingAudioImports = []
     }
 
     private func handlePickedImages(_ items: [PhotosPickerItem]) {
@@ -1939,7 +1860,7 @@ struct AlbumDetailView: View {
         let mode = album.sortMode
         // 未分组的歌也要按当前排序显示，所以从已排序的 allTracks 里筛，而不是直接用 fileNames。
         let groupedNames = Set(album.groupList.flatMap(\.fileNames))
-        let ungrouped = allTracks.filter { !groupedNames.contains($0.lastPathComponent) }
+        let ungrouped = allTracks.filter { !groupedNames.contains(storageReference($0)) }
 
         if allTracks.isEmpty {
             Section {
@@ -2018,7 +1939,7 @@ struct AlbumDetailView: View {
 
     /// 一行歌曲。点播放（队列=整张专辑）；左滑移除；右滑选分组。
     private func trackRow(url: URL, album: Album, allTracks: [URL]) -> some View {
-        let fileName = url.lastPathComponent
+        let fileName = storageReference(url)
         return Group {
             if let index = allTracks.firstIndex(of: url) {
                 Button {
@@ -2310,24 +2231,23 @@ final class SubtitleImportCoordinator: ObservableObject {
 
     /// 处理选中的字幕文件：同名音频存在的直接落地，找不到的排队等用户指定。
     /// 返回要显示的 toast 文本（没有则 nil）。
-    func handlePicked(_ urls: [URL]) -> String? {
+    func handlePicked(_ urls: [URL], candidates: [URL]) -> String? {
         // 先同步刷新一次索引：导入音频走的是 refreshSoon()，若刚导完音频紧接着导字幕，
         // 排队中的异步刷新可能还没跑，同名判定会读到旧快照而误判「找不到同名音频」。
         DocumentsIndex.shared.refresh()
 
-        // 同名判定按全库来：字幕可能对应专辑外的音频，这种情况也该直接落地。
-        let audioBaseNames = Set(
-            documentsAudioURLs().map { $0.deletingPathExtension().lastPathComponent }
-        )
+        let audioByBase = Dictionary(grouping: candidates) {
+            LibraryStorage.key($0.deletingPathExtension().lastPathComponent)
+        }
 
         var matched = 0
         var failed = 0
         var needsPicking: [PendingSubtitle] = []
 
         for url in urls {
-            let base = url.deletingPathExtension().lastPathComponent
-            if audioBaseNames.contains(base) {
-                if importSubtitleToDocuments(from: url) != nil {
+            let base = LibraryStorage.key(url.deletingPathExtension().lastPathComponent)
+            if let matches = audioByBase[base], matches.count == 1, let audio = matches.first {
+                if importSubtitleToDocuments(from: url, renameToMatch: audio) != nil {
                     matched += 1
                 } else {
                     failed += 1
@@ -2397,7 +2317,7 @@ extension View {
                         ),
                         contentTypes: subtitleContentTypes
                     ) { urls in
-                        if let message = coordinator.handlePicked(urls) {
+                        if let message = coordinator.handlePicked(urls, candidates: candidates()) {
                             toast.wrappedValue = message
                         }
                         onFinish()
@@ -2586,6 +2506,7 @@ struct UncategorizedView: View {
             try? FileManager.default.removeItem(at: u)
         }
         DocumentsIndex.shared.refresh()
+        NotificationCenter.default.post(name: .libraryFilesChanged, object: nil)
         reload()
     }
 }
@@ -2611,14 +2532,14 @@ struct AddSongsView: View {
                 emptyDescription: "先在专辑里用「从文件导入音频」添加",
                 accessory: { url in
                     // 已在本专辑里的显示勾选；点行切换加入/移出。
-                    Image(systemName: memberNames.contains(url.lastPathComponent)
+                    Image(systemName: memberNames.contains(storageReference(url))
                           ? "checkmark.circle.fill" : "plus.circle")
-                        .foregroundStyle(memberNames.contains(url.lastPathComponent)
+                        .foregroundStyle(memberNames.contains(storageReference(url))
                                          ? .blue : .secondary)
                 },
                 onTap: { url in
                     guard let album else { return }
-                    let name = url.lastPathComponent
+                    let name = storageReference(url)
                     if memberNames.contains(name) {
                         albumStore.removeFile(name, from: album)
                     } else {

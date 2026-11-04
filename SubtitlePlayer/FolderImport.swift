@@ -8,6 +8,7 @@ nonisolated struct FolderImportGroup: Sendable {
 
 nonisolated struct FolderImportResult: Sendable {
     var name: String
+    var albumID: UUID = UUID()
     var tracks: [String] = []
     var groups: [FolderImportGroup] = []
     var images: [String] = []
@@ -109,17 +110,22 @@ nonisolated enum FolderImportEngine {
         try FileManager.default.moveItem(at: temporary, to: destination)
     }
 
-    static func cleanup(_ files: [URL]) {
-        for file in files { try? FileManager.default.removeItem(at: file) }
+    static func cleanup(_ files: [URL], documents: URL? = nil) {
+        for file in files {
+            try? FileManager.default.removeItem(at: file)
+            if let root = documents ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                LibraryStorage.removeEmptyParents(of: file, root: root)
+            }
+        }
     }
 
-    static func run(folder: URL, documents: URL,
+    static func run(folder: URL, documents: URL, duplicatePolicy: DuplicateImportPolicy = .keepBoth,
                     progress: @Sendable (String, Double?) -> Void) throws -> FolderImportResult {
         let access = folder.startAccessingSecurityScopedResource()
         defer { if access { folder.stopAccessingSecurityScopedResource() } }
         var result = FolderImportResult(name: folder.lastPathComponent)
         var completed = false
-        defer { if !completed { cleanup(result.createdFiles) } }
+        defer { if !completed { cleanup(result.createdFiles, documents: documents) } }
         progress("正在扫描文件夹…", nil)
         let files = try scan(folder, issues: &result.issues)
         let audio = files.filter { audioExtensions.contains($0.ext) }
@@ -131,9 +137,7 @@ nonisolated enum FolderImportEngine {
         let byStem = Dictionary(grouping: subtitles, by: \.stem)
         let audioCounts = Dictionary(grouping: audio, by: \.stem).mapValues(\.count)
         var usedSubtitles = Set<String>()
-        let existing = try FileManager.default.contentsOfDirectory(atPath: documents.path)
-        // Reserve the entire basename, so another format's audio/subtitles cannot be paired accidentally.
-        var occupied = Set(existing.map { key(URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent) })
+        var importedNames = Set<String>()
         let images = files.filter { imageExtensions.contains($0.ext) }.sorted {
             let left = coverRank($0), right = coverRank($1)
             return left != right ? left < right : $0.path.localizedStandardCompare($1.path) == .orderedAscending
@@ -143,19 +147,19 @@ nonisolated enum FolderImportEngine {
         for file in audio {
             try Task.checkCancellation()
             progress("正在导入 \(file.path)", Double(count) / Double(total))
-            let base = file.url.deletingPathExtension().lastPathComponent.precomposedStringWithCanonicalMapping
-            var candidate = base
-            var number = 2
-            while occupied.contains(key(candidate)) {
-                candidate = "\(base) (\(number))"
-                number += 1
+            let filename = file.url.lastPathComponent
+            if duplicatePolicy == .skip && importedNames.contains(key(filename)) {
+                result.issues.append("\(file.path)：已按所选规则跳过同名音频")
+                count += 1
+                continue
             }
-            let name = candidate + "." + file.ext
-            let destination = documents.appendingPathComponent(name)
+            let name = LibraryStorage.trackPath(albumID: result.albumID, name: filename)
+            let destination = try LibraryStorage.resolve(name, in: documents)
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             do {
                 try copy(file.url, to: destination)
                 result.createdFiles.append(destination)
-                occupied.insert(key(candidate))
+                importedNames.insert(key(filename))
                 result.tracks.append(name)
                 if !file.directory.isEmpty {
                     if let i = result.groups.firstIndex(where: { $0.name == file.directory }) {
@@ -178,7 +182,7 @@ nonisolated enum FolderImportEngine {
                 let match = local.count == 1 ? local.first
                     : (local.isEmpty && audioCounts[file.stem] == 1 && global.count == 1 ? global.first : nil)
                 guard let subtitle = match else { continue }
-                let subtitleDestination = documents.appendingPathComponent(candidate + "." + ext)
+                let subtitleDestination = destination.deletingPathExtension().appendingPathExtension(ext)
                 do {
                     try copy(subtitle.url, to: subtitleDestination)
                     result.createdFiles.append(subtitleDestination)
@@ -199,7 +203,9 @@ nonisolated enum FolderImportEngine {
         for image in images {
             try Task.checkCancellation()
             progress("正在导入 \(image.path)", Double(count) / Double(total))
-            let destination = documents.appendingPathComponent("albumimg-\(UUID().uuidString).\(image.ext)")
+            let path = LibraryStorage.imagePath(albumID: result.albumID, name: UUID().uuidString + "." + image.ext)
+            let destination = try LibraryStorage.resolve(path, in: documents)
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             do {
                 try copy(image.url, to: destination)
                 guard let source = CGImageSourceCreateWithURL(destination as CFURL, nil),
@@ -208,8 +214,8 @@ nonisolated enum FolderImportEngine {
                         userInfo: [NSLocalizedDescriptionKey: "无法识别图片内容"])
                 }
                 result.createdFiles.append(destination)
-                if result.cover == nil { result.cover = destination.lastPathComponent }
-                else { result.images.append(destination.lastPathComponent) }
+                if result.cover == nil { result.cover = path }
+                else { result.images.append(path) }
             } catch is CancellationError { throw CancellationError() }
             catch {
                 try? FileManager.default.removeItem(at: destination)

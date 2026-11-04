@@ -40,7 +40,7 @@ final class DocumentsIndex: ObservableObject {
     /// 重新扫描 Documents（一次 contentsOfDirectory）。文件增删改后必须调用。
     func refresh() {
         guard let documentsURL else { return }
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: documentsURL.path)) ?? []
+        let names = (try? LibraryStorage.files(in: documentsURL)) ?? []
         fileNames = Set(names)
         audioFileNames = names.filter {
             audioFileExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
@@ -52,7 +52,7 @@ final class DocumentsIndex: ObservableObject {
             let url = URL(fileURLWithPath: name)
             let ext = url.pathExtension.lowercased()
             guard subtitleFileExtensions.contains(ext) else { continue }
-            let base = url.deletingPathExtension().lastPathComponent
+            let base = LibraryStorage.key((name as NSString).deletingPathExtension)
             // 已有更高优先级的格式就不覆盖。
             if let existing = formats[base],
                let existingRank = subtitleFileExtensions.firstIndex(of: existing.lowercased()),
@@ -84,7 +84,7 @@ final class DocumentsIndex: ObservableObject {
 
     /// 该音频是否已配字幕，返回格式名（如 "LRC"）；没有则 nil。
     func subtitleFormat(for audioURL: URL) -> String? {
-        subtitleFormatByBase[audioURL.deletingPathExtension().lastPathComponent]
+        subtitleFormatByBase[LibraryStorage.key((storageReference(audioURL) as NSString).deletingPathExtension)]
     }
 }
 
@@ -125,6 +125,8 @@ final class CoverImageCache {
             cache.removeValue(forKey: key)
         }
     }
+
+    func invalidateAll() { cache.removeAll() }
 
     /// 内存告急或恢复备份后整体丢弃。
     func removeAll() {

@@ -202,6 +202,32 @@ struct ContentView: View {
                     .ignoresSafeArea()
             }
         }
+        .overlay {
+            if albumStore.isBusy {
+                ZStack {
+                    Color.black.opacity(0.15).ignoresSafeArea()
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text(albumStore.busyMessage).font(.subheadline)
+                        Text("请保持 App 打开").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                }
+                .contentShape(Rectangle())
+            }
+        }
+        .background(
+            Color.clear.alert("音乐库操作未完成", isPresented: Binding(
+                get: { albumStore.operationError != nil },
+                set: { if !$0 { albumStore.operationError = nil } }
+            )) {
+                Button("知道了") { albumStore.operationError = nil }
+            } message: { Text(albumStore.operationError ?? "") }
+        )
+        .onReceive(NotificationCenter.default.publisher(for: .libraryFilesChanged)) { _ in
+            reconcileLibraryPlayback()
+        }
         .overlay(alignment: .topLeading) {
             // PiP 源图层：始终留在视图层级并持续渲染，不随播放器收起而销毁，
             // 否则画中画会失去内容源、控件失效。1×1、透明、不挡点击。
@@ -775,6 +801,26 @@ struct ContentView: View {
         DocumentsIndex.shared.refresh()
     }
 
+    private func reconcileLibraryPlayback() {
+        playlist = playlist.filter { FileManager.default.fileExists(atPath: $0.path) }
+        if let url = currentAudioURL, !FileManager.default.fileExists(atPath: url.path) {
+            audioPlayer?.stop()
+            audioPlayer = nil
+            isPlaying = false
+            currentAudioURL = nil
+            currentIndex = nil
+            currentTime = 0
+            duration = 0
+            subtitles = []
+            artwork = nil
+            albumFallbackCover = nil
+            playerMessage = "还没有选择音频"
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        } else if let url = currentAudioURL {
+            currentIndex = playlist.firstIndex(of: url)
+        }
+    }
+
     private func loadAudio(from url: URL) {
         do {
             audioPlayer?.stop()
@@ -1312,6 +1358,10 @@ struct AudioFilesView: View {
     @State private var libraryMode: LibraryMode = .albums
     @State private var showNewAlbumAlert = false
     @State private var showFolderImport = false
+    @State private var isSelectingAlbums = false
+    @State private var selectedAlbumIDs: Set<UUID> = []
+    @State private var pendingDeletionIDs: Set<UUID> = []
+    @State private var showAlbumDeleteConfirm = false
     @State private var newAlbumName = ""
     @State private var showSettings = false
     @State private var searchText = ""
@@ -1344,6 +1394,7 @@ struct AudioFilesView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .onChange(of: libraryMode) { _, _ in isSelectingAlbums = false; selectedAlbumIDs = [] }
                 .padding(.horizontal)
                 .padding(.top, 8)
 
@@ -1399,6 +1450,18 @@ struct AudioFilesView: View {
                         FolderImportSheet(albumStore: albumStore)
                     }
                 )
+                .background(
+                    Color.clear.confirmationDialog("删除专辑及其文件？", isPresented: $showAlbumDeleteConfirm, titleVisibility: .visible) {
+                        Button("删除 \(pendingDeletionIDs.count) 个专辑及文件", role: .destructive) {
+                            albumStore.deleteAlbums(ids: pendingDeletionIDs)
+                            selectedAlbumIDs.subtract(pendingDeletionIDs)
+                            pendingDeletionIDs = []
+                        }
+                        Button("取消", role: .cancel) { pendingDeletionIDs = [] }
+                    } message: {
+                        Text(albumStore.deletionMessage(ids: pendingDeletionIDs))
+                    }
+                )
                 // 「重命名专辑」alert 与「新建专辑」alert 不能叠在同一节点（会互相顶掉），单独挂到 Color.clear 节点。
                 .background(
                     Color.clear.alert("重命名专辑", isPresented: $showRenameAlbum) {
@@ -1413,6 +1476,9 @@ struct AudioFilesView: View {
                 )
         }
         .toast($toastMessage)
+        .onChange(of: albumStore.operationMessage) { _, message in
+            if let message { toastMessage = message; albumStore.operationMessage = nil }
+        }
     }
 
     @ViewBuilder
@@ -1430,39 +1496,48 @@ struct AudioFilesView: View {
     @ToolbarContentBuilder
     private var libraryToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            Button {
-                showSettings = true
-            } label: {
-                Image(systemName: "gearshape")
+            if isSelectingAlbums {
+                Button(allVisibleAlbumsSelected ? "取消全选" : "全选") {
+                    let visible = Set(filteredAlbums.map(\.id))
+                    if allVisibleAlbumsSelected { selectedAlbumIDs.subtract(visible) }
+                    else { selectedAlbumIDs.formUnion(visible) }
+                }
+            } else {
+                Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                    .accessibilityLabel("设置")
             }
-            .accessibilityLabel("设置")
         }
         if libraryMode == .albums {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button {
-                        showNewAlbumAlert = true
-                    } label: {
-                        Label("新建专辑", systemImage: "plus")
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if isSelectingAlbums {
+                    Button("删除(\(selectedAlbumIDs.count))", role: .destructive) {
+                        requestAlbumDeletion(selectedAlbumIDs)
                     }
-                    Button {
-                        showFolderImport = true
-                    } label: {
-                        Label("导入作品文件夹", systemImage: "folder")
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .accessibilityLabel("添加专辑")
-            }
-        }
-        if showsDoneButton {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("完成") {
-                    dismiss()
+                    .disabled(selectedAlbumIDs.isEmpty)
+                    Button("完成") { isSelectingAlbums = false; selectedAlbumIDs = [] }
+                } else {
+                    Button("选择") { isSelectingAlbums = true; selectedAlbumIDs = [] }
+                        .disabled(albumStore.albums.isEmpty)
+                    Menu {
+                        Button { showNewAlbumAlert = true } label: { Label("新建专辑", systemImage: "plus") }
+                        Button { showFolderImport = true } label: { Label("导入作品文件夹", systemImage: "folder") }
+                    } label: { Image(systemName: "plus") }
+                    .accessibilityLabel("添加专辑")
                 }
             }
         }
+        if showsDoneButton && !isSelectingAlbums {
+            ToolbarItem(placement: .topBarTrailing) { Button("完成") { dismiss() } }
+        }
+    }
+
+    private var allVisibleAlbumsSelected: Bool {
+        !filteredAlbums.isEmpty && Set(filteredAlbums.map(\.id)).isSubset(of: selectedAlbumIDs)
+    }
+
+    private func requestAlbumDeletion(_ ids: Set<UUID>) {
+        pendingDeletionIDs = ids
+        showAlbumDeleteConfirm = !ids.isEmpty
     }
 
     private var searchBar: some View {
@@ -1470,7 +1545,7 @@ struct AudioFilesView: View {
     }
 
     private var filteredAlbums: [Album] {
-        var result = albumStore.albums
+        var result = LibraryStorage.ordered(albumStore.albums)
         // 标签筛选与关键词是「与」关系：先按选中的标签收窄，再在结果里搜。
         if let selectedTag {
             result = result.filter { album in
@@ -1542,101 +1617,115 @@ struct AudioFilesView: View {
     private var albumsList: some View {
         let albums = filteredAlbums
         let isFiltering = !searchText.isEmpty || selectedTag != nil
-        // 「未分类」虚拟专辑：把不在任何专辑里的音频聚在一起。筛选时不显示（它没有标签也没名字可搜）。
         let uncategorized = isFiltering ? [] : albumStore.uncategorizedURLs()
+        let pinned = albums.filter { $0.pinRank != nil }
+        let ordinary = albums.filter { $0.pinRank == nil }
         if albums.isEmpty && uncategorized.isEmpty {
             ContentUnavailableView(
                 isFiltering ? "无匹配结果" : "还没有专辑",
                 systemImage: isFiltering ? "magnifyingglass" : "square.stack",
-                description: Text(isFiltering
-                    ? "换个关键词或标签试试"
-                    : "点右上角 + 新建专辑，或直接导入作品文件夹")
+                description: Text(isFiltering ? "换个关键词或标签试试" : "点右上角 + 新建专辑，或直接导入作品文件夹")
             )
         } else {
             List {
-                if !uncategorized.isEmpty {
-                    NavigationLink {
-                        UncategorizedView(albumStore: albumStore) { urls, index, cover in
-                            onSelect(urls, index, cover)
-                            dismiss()
-                        }
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "tray.full")
-                                .foregroundStyle(.secondary)
-                                .frame(width: 44, height: 44)
-                                .background(.gray.opacity(0.15))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-
-                            Text("未分类")
-
-                            Spacer()
-
-                            Text("\(uncategorized.count) 首")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .listRowBackground(rowBackground)
+                if !pinned.isEmpty {
+                    Section("置顶") { ForEach(pinned) { album in albumListRow(album) } }
                 }
-
-                ForEach(albums) { album in
-                    NavigationLink {
-                        AlbumDetailView(albumID: album.id, albumStore: albumStore) { urls, index, cover in
-                            onSelect(urls, index, cover)
-                            dismiss()
-                        }
-                    } label: {
-                        HStack(spacing: 12) {
-                            albumThumbnail(for: album)
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(album.name)
-
-                                // 备注/标签是找作品的主要线索，列表里直接给一行摘要。
-                                if let note = album.note, !note.isEmpty {
-                                    Text(note)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-                                if !album.tagList.isEmpty {
-                                    Text(album.tagList.map { "#\($0)" }.joined(separator: " "))
-                                        .font(.caption2)
-                                        .foregroundStyle(.tint)
-                                        .lineLimit(1)
-                                }
+                if !uncategorized.isEmpty && !isSelectingAlbums {
+                    Section {
+                        NavigationLink {
+                            UncategorizedView(albumStore: albumStore) { urls, index, cover in
+                                onSelect(urls, index, cover)
+                                dismiss()
                             }
-
-                            Spacer()
-
-                            Text("\(album.fileNames.count) 首")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .listRowBackground(rowBackground)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button(role: .destructive) {
-                            albumStore.deleteAlbum(album)
                         } label: {
-                            Label("删除", systemImage: "trash")
+                            HStack(spacing: 12) {
+                                Image(systemName: "tray.full").frame(width: 44, height: 44)
+                                Text("未分类")
+                                Spacer()
+                                Text("\(uncategorized.count) 首").font(.caption).foregroundStyle(.secondary)
+                            }
                         }
+                        .listRowBackground(rowBackground)
                     }
-                    .swipeActions(edge: .leading) {
-                        Button {
-                            renameAlbumTarget = album
-                            renameText = album.name
-                            showRenameAlbum = true
-                        } label: {
-                            Label("重命名", systemImage: "pencil")
-                        }
-                        .tint(.blue)
+                }
+                if !ordinary.isEmpty {
+                    Section(pinned.isEmpty ? "专辑" : "其他专辑") {
+                        ForEach(ordinary) { album in albumListRow(album) }
                     }
                 }
             }
             .scrollContentBackground(backgroundStore.image == nil ? .automatic : .hidden)
         }
+    }
+
+    private func albumListRow(_ album: Album) -> some View {
+        Group {
+            if isSelectingAlbums {
+                Button {
+                    if selectedAlbumIDs.contains(album.id) { selectedAlbumIDs.remove(album.id) }
+                    else { selectedAlbumIDs.insert(album.id) }
+                } label: { albumRowLabel(album) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(album.name)，\(selectedAlbumIDs.contains(album.id) ? "已选择" : "未选择")")
+            } else {
+                NavigationLink {
+                    AlbumDetailView(albumID: album.id, albumStore: albumStore) { urls, index, cover in
+                        onSelect(urls, index, cover)
+                        dismiss()
+                    }
+                } label: { albumRowLabel(album) }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) { requestAlbumDeletion([album.id]) } label: { Label("删除", systemImage: "trash") }
+                }
+                .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                    Button { albumStore.togglePin(album) } label: {
+                        Label(album.pinRank == nil ? "置顶" : "取消置顶", systemImage: album.pinRank == nil ? "pin" : "pin.slash")
+                    }.tint(.orange)
+                    Button { renameAlbumTarget = album; renameText = album.name; showRenameAlbum = true } label: {
+                        Label("重命名", systemImage: "pencil")
+                    }.tint(.blue)
+                }
+                .contextMenu {
+                    Button { albumStore.togglePin(album) } label: {
+                        Label(album.pinRank == nil ? "置顶" : "取消置顶", systemImage: "pin")
+                    }
+                    if album.pinRank != nil {
+                        Button("置顶顺序上移") { albumStore.movePin(album, by: -1) }
+                        Button("置顶顺序下移") { albumStore.movePin(album, by: 1) }
+                    }
+                    Button("重命名") { renameAlbumTarget = album; renameText = album.name; showRenameAlbum = true }
+                    Button("删除专辑及文件", role: .destructive) { requestAlbumDeletion([album.id]) }
+                }
+            }
+        }
+        .listRowBackground(rowBackground)
+    }
+
+    private func albumRowLabel(_ album: Album) -> some View {
+        HStack(spacing: 12) {
+            if isSelectingAlbums {
+                Image(systemName: selectedAlbumIDs.contains(album.id) ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selectedAlbumIDs.contains(album.id) ? Color.accentColor : Color.secondary)
+            }
+            albumThumbnail(for: album)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    if album.pinRank != nil { Image(systemName: "pin.fill").font(.caption).foregroundStyle(.secondary) }
+                    Text(album.name)
+                }
+                if let note = album.note, !note.isEmpty {
+                    Text(note).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                if !album.tagList.isEmpty {
+                    Text(album.tagList.map { "#" + $0 }.joined(separator: " "))
+                        .font(.caption2).foregroundStyle(.tint).lineLimit(1)
+                }
+            }
+            Spacer()
+            Text("\(album.fileNames.count) 首").font(.caption).foregroundStyle(.secondary)
+        }
+        .contentShape(Rectangle())
     }
 
     // MARK: - 小工具页
