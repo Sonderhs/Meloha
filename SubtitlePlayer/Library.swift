@@ -880,6 +880,7 @@ final class AlbumStore: ObservableObject {
             if let root = documentsDirectory { try LibraryStorage.recover(root: root) }
             try JSONEncoder().encode(updated).write(to: storeURL, options: .atomic)
             albums = updated
+            DocumentsIndex.shared.refreshAlbumNames()
         } catch { operationError = error.localizedDescription }
     }
 
@@ -887,6 +888,7 @@ final class AlbumStore: ObservableObject {
         do {
             if let root = documentsDirectory { try LibraryStorage.recover(root: root) }
             try JSONEncoder().encode(albums).write(to: storeURL, options: .atomic)
+            DocumentsIndex.shared.refreshAlbumNames()
         }
         catch { operationError = error.localizedDescription }
     }
@@ -928,7 +930,7 @@ final class AlbumStore: ObservableObject {
                     return plan
                 }.value
                 albums = plan.remaining
-                CoverImageCache.shared.invalidateAll()
+                CoverImageCache.shared.removeAll()
                 DocumentsIndex.shared.refresh()
                 NotificationCenter.default.post(name: .libraryFilesChanged, object: nil)
                 operationMessage = "已删除 \(plan.albumCount) 个专辑、\(plan.trackCount) 首音频"
@@ -993,17 +995,23 @@ final class AlbumStore: ObservableObject {
     func setCover(data: Data, for album: Album) {
         guard UIImage(data: data) != nil,
               let index = albums.firstIndex(where: { $0.id == album.id }),
-              let documentsURL = documentsDirectory else {
-            return
-        }
-        let name = LibraryStorage.imagePath(albumID: album.id, name: "cover.jpg")
-        try? FileManager.default.createDirectory(at: documentsURL.appendingPathComponent(name).deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: documentsURL.appendingPathComponent(name), options: .atomic)
-        albums[index].coverFileName = name
-        // 文件名固定（按专辑 id），换封面必须清掉旧的解码缓存，否则仍显示旧图。
-        CoverImageCache.shared.invalidate(fileName: name)
-        DocumentsIndex.shared.refresh()
-        save()
+              let root = documentsDirectory else { return }
+        let name = LibraryStorage.imagePath(albumID: album.id)
+        do {
+            let destination = try LibraryStorage.resolve(name, in: root)
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: destination, options: .atomic)
+            let old = albums[index].coverFileName
+            var updated = albums
+            updated[index].coverFileName = name
+            try JSONEncoder().encode(updated).write(to: storeURL, options: .atomic)
+            albums = updated
+            if let old, !album.imageList.contains(old) {
+                try? FileManager.default.removeItem(at: root.appendingPathComponent(old))
+                CoverImageCache.shared.invalidate(fileName: old)
+            }
+            DocumentsIndex.shared.refresh()
+        } catch { operationError = error.localizedDescription }
     }
 
     func removeCover(for album: Album) {

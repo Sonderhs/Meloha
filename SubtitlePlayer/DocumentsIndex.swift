@@ -26,6 +26,7 @@ final class DocumentsIndex: ObservableObject {
     private(set) var audioFileNames: [String] = []
     /// 音频基名 → 字幕格式（大写，如 "LRC"）。按 srt → vtt → lrc 优先级取第一个存在的。
     private var subtitleFormatByBase: [String: String] = [:]
+    private var albumNamesByFile: [String: String] = [:]
     /// 变更计数：SwiftUI 视图观察它来触发重绘（比发布整个字典便宜）。
     @Published private(set) var revision = 0
 
@@ -63,10 +64,28 @@ final class DocumentsIndex: ObservableObject {
             formats[base] = ext.uppercased()
         }
         subtitleFormatByBase = formats
+        refreshAlbumNames()
         // 文件有变动，按路径缓存的修改时间/时长也可能失效。
         AlbumStore.clearFileAttributeCaches()
         revision += 1
     }
+
+    func refreshAlbumNames() {
+        guard let documentsURL,
+              let data = try? Data(contentsOf: documentsURL.appendingPathComponent("albums.json")),
+              let albums = try? JSONDecoder().decode([Album].self, from: data) else {
+            albumNamesByFile = [:]
+            return
+        }
+        var names: [String: [String]] = [:]
+        for album in albums {
+            for file in album.fileNames { names[file, default: []].append(album.name) }
+        }
+        albumNamesByFile = names.mapValues { Array(Set($0)).sorted().joined(separator: "、") }
+        revision += 1
+    }
+
+    func albumNames(for url: URL) -> String? { albumNamesByFile[storageReference(url)] }
 
     /// 给非主 actor 的调用点用（全局导入函数等）。已在主线程则立即刷新，否则排到主线程。
     nonisolated static func refreshSoon() {
@@ -125,8 +144,6 @@ final class CoverImageCache {
             cache.removeValue(forKey: key)
         }
     }
-
-    func invalidateAll() { cache.removeAll() }
 
     /// 内存告急或恢复备份后整体丢弃。
     func removeAll() {

@@ -75,6 +75,7 @@ struct AudioPickerList<Accessory: View>: View {
     var onTap: (URL) -> Void
 
     @State private var searchText = ""
+    @ObservedObject private var index = DocumentsIndex.shared
 
     private var isEmpty: Bool {
         sections.allSatisfy { $0.files.isEmpty }
@@ -138,8 +139,11 @@ struct AudioPickerList<Accessory: View>: View {
             } label: {
                 HStack {
                     Label {
-                        Text(url.deletingPathExtension().lastPathComponent)
-                            .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(url.deletingPathExtension().lastPathComponent).lineLimit(1)
+                            Text(index.albumNames(for: url) ?? "未分类")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
                     } icon: {
                         Image(systemName: rowIcon)
                     }

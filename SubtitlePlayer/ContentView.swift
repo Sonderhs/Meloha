@@ -902,6 +902,23 @@ struct ContentView: View {
             return
         }
 
+        if subtitleExtensions.contains(ext) {
+            let stem = LibraryStorage.key(url.deletingPathExtension().lastPathComponent)
+            let matches = documentsAudioURLs().filter {
+                LibraryStorage.key($0.deletingPathExtension().lastPathComponent) == stem
+            }
+            guard matches.count == 1, let audio = matches.first else {
+                toastMessage = matches.isEmpty ? "请先导入音频，再在专辑内配对字幕" : "存在多个同名音频，请在对应专辑内导入字幕"
+                return
+            }
+            if let name = importSubtitleToDocuments(from: url, renameToMatch: audio),
+               let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                if currentAudioURL == audio { loadSubtitle(from: root.appendingPathComponent(name)) }
+                toastMessage = "已导入字幕"
+            } else { toastMessage = "字幕导入失败，请确认文件可访问" }
+            return
+        }
+
         guard let documentsURL = try? FileManager.default.url(
             for: .documentDirectory,
             in: .userDomainMask,
@@ -938,36 +955,11 @@ struct ContentView: View {
     }
 
     private func importSubtitle(from sourceURL: URL) {
-        let canAccessFile = sourceURL.startAccessingSecurityScopedResource()
-        defer {
-            if canAccessFile {
-                sourceURL.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        do {
-            let documentsURL = try FileManager.default.url(
-                for: .documentDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-            let destinationURL = uniqueFileURL(
-                in: documentsURL,
-                fileName: sourceURL.lastPathComponent
-            )
-            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-            DocumentsIndex.shared.refresh()
-
-            if let currentAudioURL,
-               currentAudioURL.deletingPathExtension().lastPathComponent == sourceURL.deletingPathExtension().lastPathComponent {
-                loadSubtitle(from: destinationURL)
-            } else {
-                subtitleStatus = "字幕已导入；载入同名音频时会自动匹配"
-            }
-        } catch {
-            subtitleStatus = "无法导入字幕"
-        }
+        guard let currentAudioURL else { subtitleStatus = "请先选择音频，再导入字幕"; return }
+        if let name = importSubtitleToDocuments(from: sourceURL, renameToMatch: currentAudioURL),
+           let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            loadSubtitle(from: root.appendingPathComponent(name))
+        } else { subtitleStatus = "无法导入字幕，请确认文件已下载且允许访问" }
     }
 
     private func uniqueFileURL(in folder: URL, fileName: String) -> URL {
@@ -1444,6 +1436,7 @@ struct AudioFilesView: View {
                 }
                 .sheet(isPresented: $showSettings) {
                     SettingsView(backgroundStore: backgroundStore, albumStore: albumStore)
+                        .disabled(albumStore.isBusy)
                 }
                 .background(
                     Color.clear.sheet(isPresented: $showFolderImport) {
