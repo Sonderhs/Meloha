@@ -890,6 +890,13 @@ final class AlbumStore: ObservableObject {
             operationError = "音乐库尚未恢复完成，暂时不能修改。请重启重试或恢复备份。"
             return false
         }
+        if let root = documentsDirectory {
+            do { try LibraryStorage.recover(root: root) }
+            catch {
+                operationError = "上次操作的文件清理尚未完成，请重启后重试。\n" + error.localizedDescription
+                return false
+            }
+        }
         return true
     }
 
