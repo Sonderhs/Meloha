@@ -16,15 +16,15 @@ permissions:
 jobs:
   build:
     name: Build unsigned iPhone IPA
-    runs-on: macos-15-intel
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Select Xcode 26.3
+      - name: Select Xcode 26.6
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
           xcodebuild -version
 
       - name: Check folder import
@@ -36,6 +36,11 @@ jobs:
         run: |
           xcrun swiftc SubtitlePlayer/AlbumModels.swift SubtitlePlayer/LibraryStorage.swift SubtitlePlayer/BackupArchive.swift tests/LibraryStorageChecks.swift -o "$RUNNER_TEMP/library-storage-checks"
           "$RUNNER_TEMP/library-storage-checks"
+
+      - name: Prepare Metal compiler
+        run: |
+          xcodebuild -downloadComponent MetalToolchain
+          xcrun metal --version
 
       - name: Build and package IPA
         shell: bash
