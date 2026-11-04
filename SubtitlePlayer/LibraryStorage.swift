@@ -262,12 +262,14 @@ nonisolated enum LibraryStorage {
         }
         guard !copies.isEmpty else { return albums }
         let retained = Set(updated.flatMap { $0.fileNames + $0.imageList + [$0.coverFileName].compactMap { $0 } }.map(key))
+        let obsoleteKeys = Set(obsolete.map(key))
         let looseAudio = try files(in: root).filter {
-            audioExtensions.contains(($0 as NSString).pathExtension.lowercased()) && !obsolete.contains($0)
+            audioExtensions.contains(($0 as NSString).pathExtension.lowercased()) && !obsoleteKeys.contains(key($0))
         }
         let retainedBases = Set((updated.flatMap(\.fileNames) + looseAudio).map { key(($0 as NSString).deletingPathExtension) })
         let removals = obsolete.filter {
-            !retained.contains(key($0)) && !retainedBases.contains(key(($0 as NSString).deletingPathExtension))
+            !retained.contains(key($0)) && !(subtitleExtensions.contains(($0 as NSString).pathExtension.lowercased())
+                && retainedBases.contains(key(($0 as NSString).deletingPathExtension)))
         }.sorted()
         try transact(root: root, next: updated, copies: copies, removals: removals, progress: progress)
         return updated
