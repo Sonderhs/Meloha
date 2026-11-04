@@ -22,14 +22,16 @@ final class FolderImportController: ObservableObject {
         issues = []
         status = "正在扫描文件夹…"
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let job = Task.detached(priority: .userInitiated) { [weak self] in
-            try FolderImportEngine.run(folder: folder, documents: documents) { status, fraction in
-                Task { @MainActor [weak self] in
-                    guard let self, self.running, self.worker?.isCancelled != true else { return }
-                    self.status = status
-                    self.fraction = fraction
-                }
+        let report: @Sendable (String, Double?) -> Void = { [weak self] status, fraction in
+            guard let controller = self else { return }
+            Task { @MainActor in
+                guard controller.running, controller.worker?.isCancelled != true else { return }
+                controller.status = status
+                controller.fraction = fraction
             }
+        }
+        let job = Task.detached(priority: .userInitiated) {
+            try FolderImportEngine.run(folder: folder, documents: documents, progress: report)
         }
         worker = job
         Task {
