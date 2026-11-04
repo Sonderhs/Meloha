@@ -831,6 +831,7 @@ struct AudioDocumentPicker: UIViewControllerRepresentable {
 final class AlbumStore: ObservableObject {
     @Published private(set) var albums: [Album] = []
     @Published private(set) var isBusy = true
+    @Published private(set) var isReadOnly = false
     @Published private(set) var busyMessage = "正在读取音乐库…"
     @Published var operationError: String?
     @Published var operationMessage: String?
@@ -869,13 +870,31 @@ final class AlbumStore: ObservableObject {
                     ? try JSONDecoder().decode([Album].self, from: Data(contentsOf: file)) : []
                 return try LibraryStorage.migrate(old, root: root, progress: report)
             }.value
+            isReadOnly = false
             DocumentsIndex.shared.refresh()
             NotificationCenter.default.post(name: .libraryFilesChanged, object: nil)
-        } catch { operationError = "音乐库整理未完成，原有数据已保留。\n" + error.localizedDescription }
+        } catch {
+            // A failed migration must not replace a valid old library with an empty in-memory list.
+            if let data = try? Data(contentsOf: storeURL), let old = try? JSONDecoder().decode([Album].self, from: data) {
+                albums = old
+            }
+            isReadOnly = true
+            DocumentsIndex.shared.refresh()
+            operationError = "音乐库整理未完成，已保留原有数据并暂停修改。请重启后重试，或在设置中恢复备份。\n" + error.localizedDescription
+        }
         isBusy = false
     }
 
+    private func canModify() -> Bool {
+        guard !isReadOnly else {
+            operationError = "音乐库尚未恢复完成，暂时不能修改。请重启重试或恢复备份。"
+            return false
+        }
+        return true
+    }
+
     private func persist(_ updated: [Album]) {
+        guard canModify() else { return }
         do {
             if let root = documentsDirectory { try LibraryStorage.recover(root: root) }
             try JSONEncoder().encode(updated).write(to: storeURL, options: .atomic)
@@ -885,6 +904,7 @@ final class AlbumStore: ObservableObject {
     }
 
     private func save() {
+        guard canModify() else { return }
         do {
             if let root = documentsDirectory { try LibraryStorage.recover(root: root) }
             try JSONEncoder().encode(albums).write(to: storeURL, options: .atomic)
@@ -894,6 +914,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func togglePin(_ album: Album) {
+        guard canModify() else { return }
         guard !isBusy else { return }
         var updated = albums
         LibraryStorage.togglePin(album.id, in: &updated)
@@ -901,6 +922,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func movePin(_ album: Album, by offset: Int) {
+        guard canModify() else { return }
         guard !isBusy else { return }
         var updated = albums
         LibraryStorage.movePin(album.id, by: offset, in: &updated)
@@ -918,6 +940,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func deleteAlbums(ids: Set<UUID>) {
+        guard canModify() else { return }
         guard !isBusy, !ids.isEmpty, let root = documentsDirectory else { return }
         let snapshot = albums
         isBusy = true
@@ -944,6 +967,7 @@ final class AlbumStore: ObservableObject {
 
     /// 设置备注与标签。标签去空白、去重、丢掉空项。
     func setDetails(note: String, tags: [String], for album: Album) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
         albums[index].note = trimmedNote.isEmpty ? nil : trimmedNote
@@ -970,6 +994,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func createAlbum(name: String) {
+        guard canModify() else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return
@@ -980,6 +1005,7 @@ final class AlbumStore: ObservableObject {
 
     /// Commit the album only after its files have landed and albums.json is saved successfully.
     func addImportedFolder(_ result: FolderImportResult) throws {
+        guard canModify() else { throw LibraryStorage.failure("音乐库尚未恢复完成") }
         let album = Album(id: result.albumID, name: result.name, fileNames: result.tracks,
             coverFileName: result.cover,
             groups: result.groups.map { AlbumGroup(name: $0.name, fileNames: $0.fileNames) },
@@ -993,6 +1019,7 @@ final class AlbumStore: ObservableObject {
 
     /// 设置专辑封面（图片数据写入 Documents）。
     func setCover(data: Data, for album: Album) {
+        guard canModify() else { return }
         guard UIImage(data: data) != nil,
               let index = albums.firstIndex(where: { $0.id == album.id }),
               let root = documentsDirectory else { return }
@@ -1015,6 +1042,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func removeCover(for album: Album) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else {
             return
         }
@@ -1039,6 +1067,7 @@ final class AlbumStore: ObservableObject {
 
     /// 追加一张图片。写盘成功才记进 JSON，避免留下指向不存在文件的名字。
     func addImage(data: Data, to album: Album) {
+        guard canModify() else { return }
         guard UIImage(data: data) != nil,
               let index = albums.firstIndex(where: { $0.id == album.id }),
               let documentsURL = documentsDirectory else {
@@ -1057,6 +1086,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func removeImage(_ fileName: String, from album: Album) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
         if let documentsURL = documentsDirectory {
             try? FileManager.default.removeItem(at: documentsURL.appendingPathComponent(fileName))
@@ -1075,6 +1105,7 @@ final class AlbumStore: ObservableObject {
     // MARK: 专辑内分组（只有一层）
 
     func createGroup(name: String, in album: Album) {
+        guard canModify() else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
@@ -1083,6 +1114,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func renameGroup(_ group: AlbumGroup, to newName: String, in album: Album) {
+        guard canModify() else { return }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let albumIndex = albums.firstIndex(where: { $0.id == album.id }),
@@ -1096,6 +1128,7 @@ final class AlbumStore: ObservableObject {
 
     /// 删除分组。组里的歌**不删**，回到专辑根（未分组）——分组只是归类，不该连歌一起丢。
     func deleteGroup(_ group: AlbumGroup, in album: Album) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
         albums[index].groupList.removeAll { $0.id == group.id }
         save()
@@ -1104,6 +1137,7 @@ final class AlbumStore: ObservableObject {
     /// 把歌移动到某个分组；`group` 为 nil 表示移出分组（回到专辑根）。
     /// 一首歌同时只能属于一个组，所以先从所有组里摘掉再加。
     func moveFile(_ fileName: String, to group: AlbumGroup?, in album: Album) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
         var groups = albums[index].groupList
         for i in groups.indices {
@@ -1127,6 +1161,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func addFiles(_ fileNames: [String], to album: Album) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else {
             return
         }
@@ -1137,6 +1172,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func removeFile(_ fileName: String, from album: Album) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else {
             return
         }
@@ -1151,6 +1187,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func renameAlbum(_ album: Album, to newName: String) {
+        guard canModify() else { return }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let index = albums.firstIndex(where: { $0.id == album.id }) else {
@@ -1161,6 +1198,7 @@ final class AlbumStore: ObservableObject {
     }
 
     func moveTracks(in album: Album, fromOffsets: IndexSet, toOffset: Int) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else {
             return
         }
@@ -1171,6 +1209,7 @@ final class AlbumStore: ObservableObject {
     /// 拖动排序「未分组」区。偏移量是相对未分组子集的，得映射回 fileNames 的全局下标，
     /// 否则有分组时会挪错歌。
     func moveUngrouped(in album: Album, fromOffsets: IndexSet, toOffset: Int) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
         let ungrouped = albums[index].ungroupedFileNames
         guard !ungrouped.isEmpty else { return }
@@ -1189,6 +1228,7 @@ final class AlbumStore: ObservableObject {
 
     /// 文件重命名后，同步更新所有专辑里的引用（含分组内的引用）。
     func replaceFileName(_ oldName: String, with newName: String) {
+        guard canModify() else { return }
         var changed = false
         for index in albums.indices {
             if let position = albums[index].fileNames.firstIndex(of: oldName) {
@@ -1294,6 +1334,7 @@ final class AlbumStore: ObservableObject {
     /// 设置排序方式。切到非手动时不改动 fileNames，只改显示顺序；
     /// 切回手动时把当前可见顺序固化下来，避免顺序突然跳回很久以前的样子。
     func setSort(_ mode: AlbumSort, for album: Album) {
+        guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
         if mode == .manual, albums[index].sortMode != .manual {
             let visible = tracks(in: album).map { storageReference($0) }
