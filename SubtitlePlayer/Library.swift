@@ -1060,6 +1060,19 @@ final class AlbumStore: ObservableObject {
         save()
     }
 
+    /// Commit the album only after its files have landed and albums.json is saved successfully.
+    func addImportedFolder(_ result: FolderImportResult) throws {
+        let album = Album(name: result.name, fileNames: result.tracks,
+            coverFileName: result.cover,
+            groups: result.groups.map { AlbumGroup(name: $0.name, fileNames: $0.fileNames) },
+            imageFileNames: result.images, sort: .manual)
+        let updated = albums + [album]
+        let data = try JSONEncoder().encode(updated)
+        try data.write(to: storeURL, options: .atomic)
+        albums = updated
+        DocumentsIndex.shared.refresh()
+    }
+
     func deleteAlbum(_ album: Album) {
         // 一并删除封面与图片集文件（它们只属于这张专辑，留着就成了孤儿文件）。
         if let documentsURL = documentsDirectory {

@@ -21,6 +21,11 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Check folder import
+        run: |
+          xcrun swiftc SubtitlePlayer/FolderImport.swift tests/FolderImportChecks.swift -o "$RUNNER_TEMP/folder-import-checks"
+          "$RUNNER_TEMP/folder-import-checks"
+
       - name: Build and package IPA
         shell: bash
         run: |

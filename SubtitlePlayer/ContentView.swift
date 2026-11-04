@@ -1311,6 +1311,7 @@ struct AudioFilesView: View {
     @ObservedObject var backgroundStore: BackgroundStore
     @State private var libraryMode: LibraryMode = .albums
     @State private var showNewAlbumAlert = false
+    @State private var showFolderImport = false
     @State private var newAlbumName = ""
     @State private var showSettings = false
     @State private var searchText = ""
@@ -1393,6 +1394,11 @@ struct AudioFilesView: View {
                 .sheet(isPresented: $showSettings) {
                     SettingsView(backgroundStore: backgroundStore, albumStore: albumStore)
                 }
+                .background(
+                    Color.clear.sheet(isPresented: $showFolderImport) {
+                        FolderImportSheet(albumStore: albumStore)
+                    }
+                )
                 // 「重命名专辑」alert 与「新建专辑」alert 不能叠在同一节点（会互相顶掉），单独挂到 Color.clear 节点。
                 .background(
                     Color.clear.alert("重命名专辑", isPresented: $showRenameAlbum) {
@@ -1433,12 +1439,21 @@ struct AudioFilesView: View {
         }
         if libraryMode == .albums {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showNewAlbumAlert = true
+                Menu {
+                    Button {
+                        showNewAlbumAlert = true
+                    } label: {
+                        Label("新建专辑", systemImage: "plus")
+                    }
+                    Button {
+                        showFolderImport = true
+                    } label: {
+                        Label("导入作品文件夹", systemImage: "folder")
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
-                .accessibilityLabel("新建专辑")
+                .accessibilityLabel("添加专辑")
             }
         }
         if showsDoneButton {
@@ -1535,7 +1550,7 @@ struct AudioFilesView: View {
                 systemImage: isFiltering ? "magnifyingglass" : "square.stack",
                 description: Text(isFiltering
                     ? "换个关键词或标签试试"
-                    : "点右上角 + 新建专辑，再往里添加歌曲")
+                    : "点右上角 + 新建专辑，或直接导入作品文件夹")
             )
         } else {
             List {
