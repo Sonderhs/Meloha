@@ -2632,7 +2632,7 @@ struct UncategorizedView: View {
         )
         .toast($toastMessage)
         .onAppear { reload() }
-        .onReceive(NotificationCenter.default.publisher(for: .libraryAudioRenamed)) { _ in reload() }
+        .onReceive(DocumentsIndex.shared.$revision) { _ in reload() }
     }
 
     private func beginRename(_ url: URL) {
