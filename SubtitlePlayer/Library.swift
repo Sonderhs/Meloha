@@ -1242,7 +1242,7 @@ final class AlbumStore: ObservableObject {
         NotificationCenter.default.post(name: .libraryAlbumOrderChanged, object: album.id)
     }
 
-    func renameAudio(_ reference: String, to name: String, in album: Album) {
+    func renameAudio(_ reference: String, to name: String, in album: Album? = nil) {
         guard canModify(), !isBusy, let root = documentsDirectory else { return }
         let snapshot = albums
         isBusy = true
@@ -1250,12 +1250,12 @@ final class AlbumStore: ObservableObject {
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try LibraryStorage.renameAudio(reference, to: name, albumID: album.id, albums: snapshot, root: root)
+                    try LibraryStorage.renameAudio(reference, to: name, albumID: album?.id, albums: snapshot, root: root)
                 }.value
                 albums = result.albums
+                DocumentsIndex.shared.refresh()
                 NotificationCenter.default.post(name: .libraryAudioRenamed, object: nil,
                     userInfo: ["old": reference, "new": result.reference])
-                DocumentsIndex.shared.refresh()
                 operationMessage = "音频和同名字幕已重命名"
             } catch { operationError = error.localizedDescription }
             isBusy = false
@@ -1544,14 +1544,14 @@ struct AlbumDetailView: View {
             .background(
                 Color.clear.alert("重命名音频", isPresented: Binding(
                     get: { renameTrackTarget != nil }, set: { if !$0 { renameTrackTarget = nil } }
-                )) {
+                ), presenting: renameTrackTarget) { url in
                     TextField("音频名称", text: $renameTrackText)
                     Button("保存") {
-                        if let url = renameTrackTarget, let album { albumStore.renameAudio(storageReference(url), to: renameTrackText, in: album) }
+                        if let album { albumStore.renameAudio(storageReference(url), to: renameTrackText, in: album) }
                         renameTrackTarget = nil
                     }
                     Button("取消", role: .cancel) { renameTrackTarget = nil }
-                } message: {
+                } message: { _ in
                     Text("保留原扩展名，同名字幕一起重命名。其他专辑共用这首音频时会同步更新。")
                 }
             )
@@ -2527,6 +2527,8 @@ struct UncategorizedView: View {
     let onSelect: ([URL], Int, UIImage?) -> Void
 
     @State private var files: [URL] = []
+    @State private var renameTrackTarget: URL?
+    @State private var renameTrackText = ""
     @State private var showAudioImporter = false
     @StateObject private var subtitleImport = SubtitleImportCoordinator()
     @State private var toastMessage: String?
@@ -2557,6 +2559,12 @@ struct UncategorizedView: View {
                                 Image(systemName: "waveform")
                             }
                         }
+                        .contextMenu {
+                            Button("重命名音频", systemImage: "pencil") { beginRename(url) }
+                        }
+                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            Button("重命名", systemImage: "pencil") { beginRename(url) }.tint(.orange)
+                        }
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
                                 delete(url)
@@ -2569,6 +2577,15 @@ struct UncategorizedView: View {
             }
         }
         .navigationTitle("未分类")
+        .background(
+            Color.clear.alert("重命名音频", isPresented: Binding(
+                get: { renameTrackTarget != nil }, set: { if !$0 { renameTrackTarget = nil } }
+            ), presenting: renameTrackTarget) { url in
+                TextField("音频名称", text: $renameTrackText)
+                Button("保存") { albumStore.renameAudio(storageReference(url), to: renameTrackText); renameTrackTarget = nil }
+                Button("取消", role: .cancel) { renameTrackTarget = nil }
+            } message: { _ in Text("保留原扩展名，同名字幕一起重命名。") }
+        )
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -2615,6 +2632,12 @@ struct UncategorizedView: View {
         )
         .toast($toastMessage)
         .onAppear { reload() }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryAudioRenamed)) { _ in reload() }
+    }
+
+    private func beginRename(_ url: URL) {
+        renameTrackText = url.deletingPathExtension().lastPathComponent
+        renameTrackTarget = url
     }
 
     private func reload() {

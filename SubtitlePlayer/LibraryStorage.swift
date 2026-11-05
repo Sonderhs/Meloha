@@ -159,7 +159,11 @@ nonisolated enum LibraryStorage {
                          progress: @Sendable (String) -> Void = { _ in }) throws {
         let fm = FileManager.default
         try recover(root: root)
-        let transaction = LibraryTransaction(nextAlbums: try JSONEncoder().encode(next), copies: copies, removals: removals, moves: moves)
+        var nextAlbums = try JSONEncoder().encode(next)
+        // File-only changes can leave album metadata unchanged. Make the atomic publish
+        // distinguishable from the previous file so recovery can still detect the commit.
+        if nextAlbums == (try? Data(contentsOf: root.appendingPathComponent("albums.json"))) { nextAlbums.append(0x0A) }
+        let transaction = LibraryTransaction(nextAlbums: nextAlbums, copies: copies, removals: removals, moves: moves)
         for copy in copies + moves {
             _ = try resolve(copy.source, in: root)
             let destination = try resolve(copy.destination, in: root)
@@ -341,7 +345,7 @@ nonisolated enum LibraryStorage {
         return albums.first(where: { $0.fileNames.contains(file) })?.id
     }
 
-    static func renameAudio(_ reference: String, to input: String, albumID: UUID, albums: [Album], root: URL) throws -> (albums: [Album], reference: String) {
+    static func renameAudio(_ reference: String, to input: String, albumID: UUID?, albums: [Album], root: URL) throws -> (albums: [Album], reference: String) {
         let source = try resolve(reference, in: root)
         let ext = source.pathExtension
         var base = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -353,14 +357,20 @@ nonisolated enum LibraryStorage {
         let name = base + (ext.isEmpty ? "" : "." + ext)
         if source.lastPathComponent == name { return (albums, reference) }
         let shared = albums.filter { $0.fileNames.contains(reference) }
-        guard !shared.isEmpty else { throw failure("音频不在专辑中") }
+        guard isAudioReference(reference), FileManager.default.fileExists(atPath: source.path) else { throw failure("音频文件不存在") }
         for album in shared where album.fileNames.contains(where: { $0 != reference && key(($0 as NSString).lastPathComponent) == key(name) }) {
             throw failure("专辑「\(album.name)」已有同名音频，请换一个名称")
         }
-        let new = trackPath(albumID: albumID, name: name)
+        let new = trackPath(albumID: albumID ?? shared.first?.id ?? UUID(), name: name)
         var moves = [LibraryFileCopy(source: reference, destination: new)]
+        var copies: [LibraryFileCopy] = []
+        let stem = key((reference as NSString).deletingPathExtension)
+        let sharesSubtitles = try files(in: root).contains {
+            $0 != reference && isAudioReference($0) && key(($0 as NSString).deletingPathExtension) == stem
+        }
         for subtitle in try sidecars(reference, root: root) {
-            moves.append(LibraryFileCopy(source: subtitle, destination: (new as NSString).deletingPathExtension + "." + (subtitle as NSString).pathExtension.lowercased()))
+            let change = LibraryFileCopy(source: subtitle, destination: (new as NSString).deletingPathExtension + "." + (subtitle as NSString).pathExtension.lowercased())
+            if sharesSubtitles { copies.append(change) } else { moves.append(change) }
         }
         var updated = albums
         for i in updated.indices {
@@ -371,7 +381,7 @@ nonisolated enum LibraryStorage {
                 return group
             }
         }
-        try transact(root: root, next: updated, moves: moves)
+        try transact(root: root, next: updated, copies: copies, moves: moves)
         return (updated, new)
     }
 

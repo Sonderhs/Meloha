@@ -211,6 +211,25 @@ struct LibraryStorageChecks {
         let caseRename = try LibraryStorage.renameAudio(renamed.reference, to: "NEW", albumID: renameAlbum.id, albums: renamed.albums, root: renameRoot)
         precondition(tryText(renameRoot, caseRename.reference) == "audio bytes")
 
+        // Uncategorized same-stem formats retain the subtitle still used by the other audio.
+        let looseRename = try directory("LooseRename")
+        try write(looseRename, "old.mp3", "loose audio")
+        try write(looseRename, "old.wav", "other format")
+        try write(looseRename, "old.lrc", "shared subtitle")
+        try write(looseRename, "albums.json", "[]")
+        let looseResult = try LibraryStorage.renameAudio("old.mp3", to: "new", albumID: nil, albums: [], root: looseRename)
+        precondition(tryText(looseRename, looseResult.reference) == "loose audio")
+        precondition(tryText(looseRename, "old.lrc") == "shared subtitle" && exists(looseRename, "old.wav"))
+        precondition(tryText(looseRename, (looseResult.reference as NSString).deletingPathExtension + ".lrc") == "shared subtitle")
+        precondition(!exists(looseRename, "old.mp3") && !exists(looseRename, ".library-transaction"))
+        let looseFailedTarget = LibraryStorage.trackPath(albumID: UUID(), name: "failed.mp3")
+        do {
+            try LibraryStorage.transact(root: looseRename, next: [], moves: [LibraryFileCopy(source: "old.wav", destination: looseFailedTarget), LibraryFileCopy(source: "missing.wav", destination: looseFailedTarget + ".missing")])
+            fatalError("Missing source accepted")
+        } catch {}
+        precondition(tryText(looseRename, "old.wav") == "other format" && !exists(looseRename, looseFailedTarget))
+        precondition(!exists(looseRename, ".library-transaction"))
+
         // Failed metadata commit rolls back audio and subtitles together.
         let renameFail = try directory("RenameFail")
         try write(renameFail, "old.mp3", "keep audio")
