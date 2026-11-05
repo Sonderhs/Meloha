@@ -928,13 +928,12 @@ struct ContentView: View {
             return
         }
 
-        let destinationURL = uniqueFileURL(in: documentsURL, fileName: url.lastPathComponent)
-        do {
-            try FileManager.default.copyItem(at: url, to: destinationURL)
-            DocumentsIndex.shared.refresh()
-        } catch {
+        // Open-in-place providers may return a placeholder; reuse coordinated import.
+        guard let imported = importAudioToDocuments(from: url) else {
+            toastMessage = "导入失败，请确认文件已下载且允许访问"
             return
         }
+        let destinationURL = documentsURL.appendingPathComponent(imported)
 
         if audioExtensions.contains(ext) {
             // 音频：直接作为单曲队列播放。
