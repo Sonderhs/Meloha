@@ -13,8 +13,14 @@ final class FolderImportController: ObservableObject {
     @Published private(set) var issues: [String] = []
     private var worker: Task<FolderImportResult, Error>?
 
-    func start(_ folder: URL, store: AlbumStore, policy: DuplicateImportPolicy) {
+    func start(_ access: SelectedFolderAccess, store: AlbumStore, policy: DuplicateImportPolicy) {
         guard !running else { return }
+        guard !store.isReadOnly else {
+            status = "音乐库尚未整理完成，暂时无法导入"
+            issues = ["请先处理音乐库的整理错误，再选择文件夹。"]
+            finished = true
+            return
+        }
         running = true
         finished = false
         fraction = nil
@@ -31,7 +37,9 @@ final class FolderImportController: ObservableObject {
             }
         }
         let job = Task.detached(priority: .userInitiated) {
-            try FolderImportEngine.run(folder: folder, documents: documents, duplicatePolicy: policy, progress: report)
+            try withExtendedLifetime(access) {
+                try FolderImportEngine.run(folder: access.url, documents: documents, duplicatePolicy: policy, progress: report)
+            }
         }
         worker = job
         Task {
@@ -59,6 +67,15 @@ final class FolderImportController: ObservableObject {
             finished = true
             worker = nil
         }
+    }
+
+    func selectionCancelled() {
+        guard !running else { return }
+        status = "已取消文件夹选择，可重新选择"
+    }
+
+    func selectionStarted() {
+        status = "请选择作品文件夹，并点系统窗口中的“打开”"
     }
 
     func cancel() {
@@ -107,6 +124,7 @@ struct FolderImportSheet: View {
                     }
                     if !controller.running {
                         Button(controller.finished ? "再导入一个文件夹" : "选择作品文件夹") {
+                            controller.selectionStarted()
                             showPicker = true
                         }
                     }
@@ -130,40 +148,75 @@ struct FolderImportSheet: View {
                     }
                 }
             }
-            .background(
-                Color.clear.sheet(isPresented: $showPicker) {
-                    FolderDocumentPicker { url in
-                        showPicker = false
-                        if let url { controller.start(url, store: albumStore, policy: duplicatePolicy) }
-                    }
-                    .ignoresSafeArea()
+            .background {
+                FolderDocumentPicker(isPresented: $showPicker) { access in
+                    if let access { controller.start(access, store: albumStore, policy: duplicatePolicy) }
+                    else { controller.selectionCancelled() }
                 }
-            )
+                .frame(width: 0, height: 0)
+            }
         }
         .interactiveDismissDisabled(controller.running)
     }
 }
 
-/// Folder access is granted in place; do not ask the provider to duplicate the whole directory.
+/// Keep the delegate alive in an embedded presenter. UIKit may dismiss its picker automatically;
+/// that must not destroy a SwiftUI sheet and its coordinator before selection is delivered.
 private struct FolderDocumentPicker: UIViewControllerRepresentable {
-    let onPick: (URL?) -> Void
+    @Binding var isPresented: Bool
+    let onPick: (SelectedFolderAccess?) -> Void
 
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+    func makeUIViewController(context: Context) -> FolderPickerHost { FolderPickerHost() }
+
+    func updateUIViewController(_ host: FolderPickerHost, context: Context) {
+        host.onFinish = { access in
+            onPick(access)
+            isPresented = false
+        }
+        host.requested = isPresented
+        host.presentWhenReady()
+    }
+}
+
+private final class FolderPickerHost: UIViewController, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
+    var requested = false
+    var onFinish: ((SelectedFolderAccess?) -> Void)?
+    private var picker: UIDocumentPickerViewController?
+    private var delivered = false
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        presentWhenReady()
+    }
+
+    func presentWhenReady() {
+        guard requested, viewIfLoaded?.window != nil, picker == nil, presentedViewController == nil else { return }
+        delivered = false
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
         picker.allowsMultipleSelection = false
-        picker.delegate = context.coordinator
-        return picker
-    }
-
-    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
-
-    final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        let onPick: (URL?) -> Void
-        init(onPick: @escaping (URL?) -> Void) { self.onPick = onPick }
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            onPick(urls.first)
+        picker.delegate = self
+        self.picker = picker
+        present(picker, animated: true) {
+            picker.presentationController?.delegate = self
         }
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { onPick(nil) }
     }
+
+    private func finish(_ url: URL?) {
+        guard !delivered else { return }
+        delivered = true
+        requested = false
+        // Acquire access inside the delegate callback, before UIKit releases the selection context.
+        let access = url.map { SelectedFolderAccess(url: $0) }
+        onFinish?(access)
+        let current = picker
+        picker = nil
+        current?.dismiss(animated: true) { [weak self] in self?.presentWhenReady() }
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        finish(urls.first)
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { finish(nil) }
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) { finish(nil) }
 }

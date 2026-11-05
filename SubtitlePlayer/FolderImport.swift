@@ -1,6 +1,19 @@
 import Foundation
 import ImageIO
 
+/// A picker-owned access lease survives the hand-off to background work.
+nonisolated final class SelectedFolderAccess: Sendable {
+    let url: URL
+    let hasSecurityScope: Bool
+
+    init(url: URL) {
+        self.url = url
+        self.hasSecurityScope = url.startAccessingSecurityScopedResource()
+    }
+
+    deinit { if hasSecurityScope { url.stopAccessingSecurityScopedResource() } }
+}
+
 nonisolated struct FolderImportGroup: Sendable {
     var name: String
     var fileNames: [String]
@@ -61,7 +74,7 @@ nonisolated enum FolderImportEngine {
                     return try children.compactMap { child in
                         let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .isPackageKey])
                         guard values.isSymbolicLink != true, values.isPackage != true,
-                              values.isDirectory == true || values.isRegularFile == true else { return nil }
+                              values.isDirectory == true || values.isRegularFile != false else { return nil }
                         return (child.lastPathComponent, values.isDirectory == true)
                     }
                 }

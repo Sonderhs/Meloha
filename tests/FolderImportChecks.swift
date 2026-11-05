@@ -34,8 +34,11 @@ struct FolderImportChecks {
         try png.write(to: folder.appendingPathComponent("page.png"))
         let existing = documents.appendingPathComponent("01 ゲーム.wav")
         try Data("keep-existing".utf8).write(to: existing)
+        let selected = SelectedFolderAccess(url: folder)
         let result = try await Task.detached {
-            try FolderImportEngine.run(folder: folder, documents: documents) { _, _ in }
+            try withExtendedLifetime(selected) {
+                try FolderImportEngine.run(folder: selected.url, documents: documents) { _, _ in }
+            }
         }.value
         precondition(result.tracks.count == 4)
         precondition(result.subtitleCount == 3)
