@@ -148,6 +148,97 @@ struct LibraryStorageChecks {
         let oldJSON = Data("[{\"id\":\"\(UUID().uuidString)\",\"name\":\"old\",\"fileNames\":[]}]".utf8)
         precondition(tryDecode(oldJSON)[0].pinRank == nil)
 
+        // Group moves preserve other groups, loose tracks, and missing entries.
+        let group = AlbumGroup(name: "CD1", fileNames: ["a.mp3", "b.mp3", "c.mp3", "missing.mp3"])
+        let otherGroup = AlbumGroup(name: "CD2", fileNames: ["other.mp3"])
+        let grouped = Album(name: "Grouped", fileNames: ["loose.mp3", "a.mp3", "other.mp3", "b.mp3", "c.mp3"],
+            groups: [group, otherGroup], sort: .manual)
+        let moved = LibraryStorage.reorderGroup(grouped, groupID: group.id, visible: ["a.mp3", "b.mp3", "c.mp3"], from: IndexSet(integer: 2), to: 0)
+        precondition(moved.groupList[0].fileNames == ["c.mp3", "a.mp3", "b.mp3", "missing.mp3"])
+        precondition(moved.groupList[1] == otherGroup)
+        precondition(moved.fileNames == ["loose.mp3", "c.mp3", "other.mp3", "a.mp3", "b.mp3"])
+        precondition(LibraryStorage.reordered(["a", "b", "c", "d"], from: IndexSet([0, 2]), to: 4) == ["b", "d", "a", "c"])
+        precondition(LibraryStorage.reordered(["a", "b"], from: IndexSet(integer: 1), to: 2) == ["a", "b"])
+        var automatic = grouped
+        automatic.sortMode = .nameAscending
+        precondition(LibraryStorage.reorderGroup(automatic, groupID: group.id, visible: ["a.mp3"], from: IndexSet(integer: 0), to: 1) == automatic)
+        let savedMove = try JSONEncoder().encode([moved])
+        precondition(tryDecode(savedMove) == [moved])
+
+        // Closing the player prefers its source album, with a surviving shared-album fallback.
+        let sharedAlbum = Album(name: "Shared", fileNames: ["a.mp3"])
+        precondition(LibraryStorage.playbackAlbum(preferred: sharedAlbum.id, file: "a.mp3", albums: [grouped, sharedAlbum]) == sharedAlbum.id)
+        precondition(LibraryStorage.playbackAlbum(preferred: sharedAlbum.id, file: "a.mp3", albums: [grouped]) == grouped.id)
+        precondition(LibraryStorage.playbackAlbum(preferred: grouped.id, file: "loose.wav", albums: [grouped]) == nil)
+
+        // Rename moves bytes without copying large audio and updates all album/group references.
+        let renameRoot = try directory("Rename")
+        var renameAlbum = Album(name: "Rename", sort: .manual)
+        let original = LibraryStorage.trackPath(albumID: renameAlbum.id, name: "old.FLAC")
+        let originalBase = (original as NSString).deletingPathExtension
+        try write(renameRoot, original, "audio bytes")
+        for ext in ["LRC", "srt", "vtt"] { try write(renameRoot, originalBase + "." + ext, ext + " bytes") }
+        renameAlbum.fileNames = [original]
+        renameAlbum.groupList = [AlbumGroup(name: "Group", fileNames: [original])]
+        let sharedRename = Album(name: "Shared rename", fileNames: [original], groups: [AlbumGroup(name: "Shared group", fileNames: [original])])
+        let unrelated = Album(name: "Unrelated", fileNames: [LibraryStorage.trackPath(albumID: UUID(), name: "new.FLAC")])
+        let renamed = try LibraryStorage.renameAudio(original, to: " new.FLAC ", albumID: renameAlbum.id, albums: [renameAlbum, sharedRename, unrelated], root: renameRoot)
+        precondition((renamed.reference as NSString).lastPathComponent == "new.FLAC")
+        precondition(tryText(renameRoot, renamed.reference) == "audio bytes" && !exists(renameRoot, original))
+        for ext in ["lrc", "srt", "vtt"] {
+            precondition(exists(renameRoot, (renamed.reference as NSString).deletingPathExtension + "." + ext))
+        }
+        for album in renamed.albums.prefix(2) {
+            precondition(album.fileNames == [renamed.reference] && album.groupList[0].fileNames == [renamed.reference])
+        }
+        precondition(renamed.albums[2] == unrelated)
+        let savedRename = try Data(contentsOf: renameRoot.appendingPathComponent("albums.json"))
+        precondition(tryDecode(savedRename) == renamed.albums)
+        precondition(!exists(renameRoot, ".library-transaction"))
+        for invalid in ["", "  ", "../escape", "bad/name", "bad\\name", "bad:name", ".hidden", "line\nbreak"] {
+            do {
+                _ = try LibraryStorage.renameAudio(renamed.reference, to: invalid, albumID: renameAlbum.id, albums: renamed.albums, root: renameRoot)
+                fatalError("Invalid rename accepted: \(invalid)")
+            } catch {}
+            precondition(tryText(renameRoot, renamed.reference) == "audio bytes")
+        }
+        var collision = renamed.albums
+        collision[1].fileNames.append(LibraryStorage.trackPath(albumID: sharedRename.id, name: "collision.FLAC"))
+        do {
+            _ = try LibraryStorage.renameAudio(renamed.reference, to: "collision", albumID: renameAlbum.id, albums: collision, root: renameRoot)
+            fatalError("Shared-album name collision accepted")
+        } catch {}
+        let caseRename = try LibraryStorage.renameAudio(renamed.reference, to: "NEW", albumID: renameAlbum.id, albums: renamed.albums, root: renameRoot)
+        precondition(tryText(renameRoot, caseRename.reference) == "audio bytes")
+
+        // Failed metadata commit rolls back audio and subtitles together.
+        let renameFail = try directory("RenameFail")
+        try write(renameFail, "old.mp3", "keep audio")
+        try write(renameFail, "old.lrc", "keep subtitle")
+        try fm.createDirectory(at: renameFail.appendingPathComponent("albums.json"), withIntermediateDirectories: true)
+        let failAlbum = Album(name: "Fail", fileNames: ["old.mp3"])
+        do {
+            _ = try LibraryStorage.renameAudio("old.mp3", to: "new", albumID: failAlbum.id, albums: [failAlbum], root: renameFail)
+            fatalError("Rename metadata failure accepted")
+        } catch {}
+        precondition(tryText(renameFail, "old.mp3") == "keep audio" && tryText(renameFail, "old.lrc") == "keep subtitle")
+        precondition(!exists(renameFail, ".library-transaction"))
+
+        // Termination during staging or after a move, before metadata publish, is recoverable.
+        for staged in [true, false] {
+            let interruptedRename = try directory("RenameInterrupted-\(staged)")
+            let target = LibraryStorage.trackPath(albumID: UUID(), name: "new.mp3")
+            try write(interruptedRename, staged ? ".library-transaction/renamed-0" : target, "recover audio")
+            try fm.createDirectory(at: interruptedRename.appendingPathComponent(".library-transaction"), withIntermediateDirectories: true)
+            let renameState = LibraryTransaction(nextAlbums: Data("[]".utf8), copies: [], removals: [],
+                moves: [LibraryFileCopy(source: "old.mp3", destination: target)])
+            try JSONEncoder().encode(renameState).write(to: interruptedRename.appendingPathComponent(".library-transaction/state.json"))
+            try LibraryStorage.recover(root: interruptedRename)
+            try LibraryStorage.recover(root: interruptedRename)
+            precondition(tryText(interruptedRename, "old.mp3") == "recover audio" && !exists(interruptedRename, target))
+        }
+        print("New feature checks passed: group reordering, playback album routing, audio/subtitle rename, shared references, invalid names, collision rejection, rollback and interrupted rename recovery.")
+
         // New nested backup round-trip, legacy flat backup, invalid paths and symlink refusal.
         let backupRoot = try directory("Backup")
         let backupPath = LibraryStorage.trackPath(albumID: pins[0].id, name: "01.mp3")

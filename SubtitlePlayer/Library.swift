@@ -1231,6 +1231,35 @@ final class AlbumStore: ObservableObject {
             ungroupedSet.contains(name) ? (iterator.next() ?? name) : name
         }
         save()
+        NotificationCenter.default.post(name: .libraryAlbumOrderChanged, object: album.id)
+    }
+
+    func moveGroupTracks(in album: Album, group: AlbumGroup, visible: [String], fromOffsets: IndexSet, toOffset: Int) {
+        guard canModify(), let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
+        var updated = albums
+        updated[index] = LibraryStorage.reorderGroup(updated[index], groupID: group.id, visible: visible, from: fromOffsets, to: toOffset)
+        persist(updated)
+        NotificationCenter.default.post(name: .libraryAlbumOrderChanged, object: album.id)
+    }
+
+    func renameAudio(_ reference: String, to name: String, in album: Album) {
+        guard canModify(), !isBusy, let root = documentsDirectory else { return }
+        let snapshot = albums
+        isBusy = true
+        busyMessage = "正在重命名音频和字幕…"
+        Task {
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try LibraryStorage.renameAudio(reference, to: name, albumID: album.id, albums: snapshot, root: root)
+                }.value
+                albums = result.albums
+                NotificationCenter.default.post(name: .libraryAudioRenamed, object: nil,
+                    userInfo: ["old": reference, "new": result.reference])
+                DocumentsIndex.shared.refresh()
+                operationMessage = "音频和同名字幕已重命名"
+            } catch { operationError = error.localizedDescription }
+            isBusy = false
+        }
     }
 
     /// 文件重命名后，同步更新所有专辑里的引用（含分组内的引用）。
@@ -1344,6 +1373,12 @@ final class AlbumStore: ObservableObject {
         guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
         if mode == .manual, albums[index].sortMode != .manual {
+            var groups = albums[index].groupList
+            for i in groups.indices {
+                let visibleGroup = tracks(in: groups[i], sortedBy: albums[index].sortMode).map { storageReference($0) }
+                groups[i].fileNames = visibleGroup + groups[i].fileNames.filter { !visibleGroup.contains($0) }
+            }
+            albums[index].groupList = groups
             let visible = tracks(in: album).map { storageReference($0) }
             // 保留当前可见顺序，磁盘上已消失的文件名附在后面不丢。
             let missing = albums[index].fileNames.filter { !visible.contains($0) }
@@ -1351,6 +1386,7 @@ final class AlbumStore: ObservableObject {
         }
         albums[index].sortMode = mode
         save()
+        NotificationCenter.default.post(name: .libraryAlbumOrderChanged, object: album.id)
     }
 
     /// 不属于任何专辑的音频：Documents 里的全部音频减去各专辑已收录的。
@@ -1368,6 +1404,9 @@ struct AlbumDetailView: View {
     @ObservedObject var albumStore: AlbumStore
     let onSelect: ([URL], Int, UIImage?) -> Void
 
+    @State private var trackEditMode: EditMode = .inactive
+    @State private var renameTrackTarget: URL?
+    @State private var renameTrackText = ""
     @State private var showAddSongs = false
     @State private var showAudioImporter = false
     @State private var pendingAudioImports: [URL] = []
@@ -1409,6 +1448,7 @@ struct AlbumDetailView: View {
                 .navigationTitle(album?.name ?? "专辑")
                 .toolbar { toolbarContent }
         )
+        .environment(\.editMode, $trackEditMode)
     }
 
     /// 导入相关的 presentation（加歌、音频导入、字幕导入、封面/图片选择）。
@@ -1501,6 +1541,20 @@ struct AlbumDetailView: View {
     /// 分组相关的弹窗 + 图片大图。每个都挂独立节点：同节点叠多个 presentation 会互相顶掉。
     private func dialogLayer<V: View>(_ view: V) -> some View {
         view
+            .background(
+                Color.clear.alert("重命名音频", isPresented: Binding(
+                    get: { renameTrackTarget != nil }, set: { if !$0 { renameTrackTarget = nil } }
+                )) {
+                    TextField("音频名称", text: $renameTrackText)
+                    Button("保存") {
+                        if let url = renameTrackTarget, let album { albumStore.renameAudio(storageReference(url), to: renameTrackText, in: album) }
+                        renameTrackTarget = nil
+                    }
+                    Button("取消", role: .cancel) { renameTrackTarget = nil }
+                } message: {
+                    Text("保留原扩展名，同名字幕一起重命名。其他专辑共用这首音频时会同步更新。")
+                }
+            )
             .background(
                 Color.clear.alert("新建分组", isPresented: $showNewGroupAlert) {
                     TextField("分组名称（如 CD1）", text: $groupNameInput)
@@ -1948,6 +2002,10 @@ struct AlbumDetailView: View {
                             ForEach(groupTracks, id: \.self) { url in
                                 trackRow(url: url, album: album, allTracks: allTracks)
                             }
+                            .onMove(perform: mode == .manual ? { offsets, destination in
+                                albumStore.moveGroupTracks(in: album, group: group,
+                                    visible: groupTracks.map { storageReference($0) }, fromOffsets: offsets, toOffset: destination)
+                            } : nil)
                         }
                     }
                 } header: {
@@ -1976,6 +2034,11 @@ struct AlbumDetailView: View {
             Spacer()
 
             Menu {
+                Button("手动排序本组") {
+                    expandedGroups.insert(group.id)
+                    albumStore.setSort(.manual, for: album)
+                    trackEditMode = .active
+                }
                 Button {
                     renameGroupTarget = group
                     groupNameInput = group.name
@@ -2013,6 +2076,12 @@ struct AlbumDetailView: View {
                         SubtitleBadge(audioURL: url)
                     }
                 }
+                .contextMenu {
+                    Button {
+                        renameTrackText = url.deletingPathExtension().lastPathComponent
+                        renameTrackTarget = url
+                    } label: { Label("重命名音频", systemImage: "pencil") }
+                }
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                     Button(role: .destructive) {
                         albumStore.removeFile(fileName, from: album)
@@ -2021,6 +2090,11 @@ struct AlbumDetailView: View {
                     }
                 }
                 .swipeActions(edge: .leading) {
+                    Button {
+                        renameTrackText = url.deletingPathExtension().lastPathComponent
+                        renameTrackTarget = url
+                    } label: { Label("重命名", systemImage: "pencil") }
+                    .tint(.orange)
                     if !album.groupList.isEmpty {
                         Button {
                             moveTarget = fileName

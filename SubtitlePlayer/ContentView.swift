@@ -39,6 +39,8 @@ struct ContentView: View {
     @State private var duration: TimeInterval = 0
     @State private var showSubtitleImporter = false
     @State private var isPlayerMinimized = true
+    @State private var libraryNavigationPath: [LibraryRoute] = []
+    @State private var playbackSourceAlbumID: UUID?
     @State private var currentAudioURL: URL?
     @State private var subtitleStatus = "从音乐库选一首开始"
     @State private var artwork: UIImage?
@@ -178,10 +180,11 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            if isPlayerMinimized {
-                libraryView
-                    .transition(.opacity)
-            } else {
+            libraryView
+                .opacity(isPlayerMinimized ? 1 : 0)
+                .allowsHitTesting(isPlayerMinimized)
+                .accessibilityHidden(!isPlayerMinimized)
+            if !isPlayerMinimized {
                 playerView
                     .padding()
                     // 跟随下滑手势整页位移，松手时由手势回调决定收起或弹回。
@@ -227,6 +230,28 @@ struct ContentView: View {
         )
         .onReceive(NotificationCenter.default.publisher(for: .libraryFilesChanged)) { _ in
             reconcileLibraryPlayback()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryAudioRenamed)) { notification in
+            guard let old = notification.userInfo?["old"] as? String,
+                  let new = notification.userInfo?["new"] as? String,
+                  let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+            let newURL = root.appendingPathComponent(new)
+            playlist = playlist.map { storageReference($0) == old ? newURL : $0 }
+            if let current = currentAudioURL, storageReference(current) == old {
+                currentAudioURL = newURL
+                playerMessage = newURL.deletingPathExtension().lastPathComponent
+                updateNowPlayingInfo()
+            }
+            currentIndex = currentAudioURL.flatMap { playlist.firstIndex(of: $0) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryAlbumOrderChanged)) { notification in
+            guard let id = notification.object as? UUID, id == playbackSourceAlbumID,
+                  let album = albumStore.albums.first(where: { $0.id == id }) else { return }
+            playlist = albumStore.tracks(in: album)
+            currentIndex = currentAudioURL.flatMap { playlist.firstIndex(of: $0) }
+        }
+        .onChange(of: isPlayerMinimized) { _, minimized in
+            if minimized { returnToPlayingAlbum() }
         }
         .overlay(alignment: .topLeading) {
             // PiP 源图层：始终留在视图层级并持续渲染，不随播放器收起而销毁，
@@ -363,7 +388,8 @@ struct ContentView: View {
         // 音乐库包含 NavigationStack：直接划分可用高度，让所有 push 的子页
         // 都在播放器上方布局，不依赖外层 safeAreaInset 向导航页面传递底部留白。
         VStack(spacing: 0) {
-            AudioFilesView(albumStore: albumStore, backgroundStore: backgroundStore, showsDoneButton: false) { urls, index, cover in
+            AudioFilesView(albumStore: albumStore, backgroundStore: backgroundStore, navigationPath: $libraryNavigationPath, showsDoneButton: false) { urls, index, cover, albumID in
+                playbackSourceAlbumID = albumID
                 playTrack(at: index, in: urls, fallbackCover: cover)
                 withAnimation(.easeInOut) {
                     isPlayerMinimized = false
@@ -801,6 +827,15 @@ struct ContentView: View {
         DocumentsIndex.shared.refresh()
     }
 
+    private func returnToPlayingAlbum() {
+        guard let url = currentAudioURL else { return }
+        let id = LibraryStorage.playbackAlbum(preferred: playbackSourceAlbumID,
+            file: storageReference(url), albums: albumStore.albums)
+        playbackSourceAlbumID = id
+        let path: [LibraryRoute] = [id.map { .album($0) } ?? .uncategorized]
+        if libraryNavigationPath != path { libraryNavigationPath = path }
+    }
+
     private func reconcileLibraryPlayback() {
         playlist = playlist.filter { FileManager.default.fileExists(atPath: $0.path) }
         if let url = currentAudioURL, !FileManager.default.fileExists(atPath: url.path) {
@@ -808,6 +843,7 @@ struct ContentView: View {
             audioPlayer = nil
             isPlaying = false
             currentAudioURL = nil
+            playbackSourceAlbumID = nil
             currentIndex = nil
             currentTime = 0
             duration = 0
@@ -937,6 +973,7 @@ struct ContentView: View {
 
         if audioExtensions.contains(ext) {
             // 音频：直接作为单曲队列播放。
+            playbackSourceAlbumID = nil
             playTrack(at: 0, in: [destinationURL])
             withAnimation(.easeInOut) {
                 isPlayerMinimized = false
@@ -1346,6 +1383,7 @@ struct AudioFilesView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var albumStore: AlbumStore
     @ObservedObject var backgroundStore: BackgroundStore
+    @Binding var navigationPath: [LibraryRoute]
     @State private var libraryMode: LibraryMode = .albums
     @State private var showNewAlbumAlert = false
     @State private var showFolderImport = false
@@ -1369,7 +1407,7 @@ struct AudioFilesView: View {
     @AppStorage("backgroundOpacity") private var backgroundOpacity: Double = 0.6
 
     var showsDoneButton: Bool = true
-    let onSelect: ([URL], Int, UIImage?) -> Void
+    let onSelect: ([URL], Int, UIImage?, UUID?) -> Void
 
     enum LibraryMode: String, CaseIterable, Identifiable {
         case albums = "专辑"
@@ -1421,8 +1459,20 @@ struct AudioFilesView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             libraryContent
+                .navigationDestination(for: LibraryRoute.self) { route in
+                    switch route {
+                    case .album(let id):
+                        AlbumDetailView(albumID: id, albumStore: albumStore) { urls, index, cover in
+                            onSelect(urls, index, cover, id)
+                        }
+                    case .uncategorized:
+                        UncategorizedView(albumStore: albumStore) { urls, index, cover in
+                            onSelect(urls, index, cover, nil)
+                        }
+                    }
+                }
                 .alert("新建专辑", isPresented: $showNewAlbumAlert) {
                     TextField("专辑名称", text: $newAlbumName)
                     Button("创建") {
@@ -1625,12 +1675,7 @@ struct AudioFilesView: View {
                 }
                 if !uncategorized.isEmpty && !isSelectingAlbums {
                     Section {
-                        NavigationLink {
-                            UncategorizedView(albumStore: albumStore) { urls, index, cover in
-                                onSelect(urls, index, cover)
-                                dismiss()
-                            }
-                        } label: {
+                        NavigationLink(value: LibraryRoute.uncategorized) {
                             HStack(spacing: 12) {
                                 Image(systemName: "tray.full").frame(width: 44, height: 44)
                                 Text("未分类")
@@ -1661,12 +1706,7 @@ struct AudioFilesView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(album.name)，\(selectedAlbumIDs.contains(album.id) ? "已选择" : "未选择")")
             } else {
-                NavigationLink {
-                    AlbumDetailView(albumID: album.id, albumStore: albumStore) { urls, index, cover in
-                        onSelect(urls, index, cover)
-                        dismiss()
-                    }
-                } label: { albumRowLabel(album) }
+                NavigationLink(value: LibraryRoute.album(album.id)) { albumRowLabel(album) }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button(role: .destructive) { requestAlbumDeletion([album.id]) } label: { Label("删除", systemImage: "trash") }
                 }

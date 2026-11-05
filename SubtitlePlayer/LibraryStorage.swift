@@ -14,6 +14,7 @@ nonisolated struct LibraryTransaction: Codable {
     var nextAlbums: Data
     var copies: [LibraryFileCopy]
     var removals: [String]
+    var moves: [LibraryFileCopy]? = nil
 }
 
 nonisolated struct AlbumDeletionPlan: Sendable {
@@ -154,12 +155,12 @@ nonisolated enum LibraryStorage {
     }
 
     /// A write-ahead journal makes copying/moving files and publishing albums.json recoverable.
-    static func transact(root: URL, next: [Album], copies: [LibraryFileCopy] = [], removals: [String] = [],
+    static func transact(root: URL, next: [Album], copies: [LibraryFileCopy] = [], removals: [String] = [], moves: [LibraryFileCopy] = [],
                          progress: @Sendable (String) -> Void = { _ in }) throws {
         let fm = FileManager.default
         try recover(root: root)
-        let transaction = LibraryTransaction(nextAlbums: try JSONEncoder().encode(next), copies: copies, removals: removals)
-        for copy in copies {
+        let transaction = LibraryTransaction(nextAlbums: try JSONEncoder().encode(next), copies: copies, removals: removals, moves: moves)
+        for copy in copies + moves {
             _ = try resolve(copy.source, in: root)
             let destination = try resolve(copy.destination, in: root)
             guard !fm.fileExists(atPath: destination.path) else { throw failure("目标文件已存在，操作已停止") }
@@ -174,6 +175,14 @@ nonisolated enum LibraryStorage {
                 let destination = try resolve(copy.destination, in: root)
                 try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try fm.copyItem(at: resolve(copy.source, in: root), to: destination)
+            }
+            for (i, move) in moves.enumerated() {
+                let destination = try resolve(move.destination, in: root)
+                try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fm.moveItem(at: resolve(move.source, in: root), to: journal.appendingPathComponent("renamed-\(i)"))
+            }
+            for (i, move) in moves.enumerated() {
+                try fm.moveItem(at: journal.appendingPathComponent("renamed-\(i)"), to: resolve(move.destination, in: root))
             }
             for (i, path) in removals.enumerated() {
                 let file = try resolve(path, in: root)
@@ -213,6 +222,18 @@ nonisolated enum LibraryStorage {
                     try fm.moveItem(at: staged, to: destination)
                 }
             }
+            for (i, move) in (transaction.moves ?? []).enumerated().reversed() {
+                let staged = journal.appendingPathComponent("renamed-\(i)")
+                let destination = try resolve(move.destination, in: root)
+                let original = try resolve(move.source, in: root)
+                let saved = fm.fileExists(atPath: staged.path) ? staged : destination
+                if fm.fileExists(atPath: saved.path) {
+                    guard !fm.fileExists(atPath: original.path) else { throw failure("恢复重命名时发现同名文件") }
+                    try fm.createDirectory(at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fm.moveItem(at: saved, to: original)
+                }
+                removeEmptyParents(of: destination, root: root)
+            }
             for copy in transaction.copies {
                 let path = try resolve(copy.destination, in: root)
                 if fm.fileExists(atPath: path.path) { try fm.removeItem(at: path) }
@@ -221,6 +242,7 @@ nonisolated enum LibraryStorage {
         }
         try fm.removeItem(at: journal)
         if committed {
+            for move in transaction.moves ?? [] { removeEmptyParents(of: try resolve(move.source, in: root), root: root) }
             for path in transaction.removals { removeEmptyParents(of: try resolve(path, in: root), root: root) }
         }
     }
@@ -293,6 +315,66 @@ nonisolated enum LibraryStorage {
         return updated
     }
 
+    static func reordered(_ values: [String], from offsets: IndexSet, to destination: Int) -> [String] {
+        guard !offsets.isEmpty, offsets.allSatisfy(values.indices.contains), (0...values.count).contains(destination) else { return values }
+        let moving = offsets.sorted().map { values[$0] }
+        var result = values.enumerated().filter { !offsets.contains($0.offset) }.map(\.element)
+        result.insert(contentsOf: moving, at: destination - offsets.filter { $0 < destination }.count)
+        return result
+    }
+
+    static func reorderGroup(_ album: Album, groupID: UUID, visible: [String], from offsets: IndexSet, to destination: Int) -> Album {
+        var result = album
+        guard let index = result.groupList.firstIndex(where: { $0.id == groupID }), album.sortMode == .manual else { return result }
+        let reordered = reordered(visible, from: offsets, to: destination)
+        var groups = result.groupList
+        groups[index].fileNames = reordered + groups[index].fileNames.filter { !visible.contains($0) }
+        result.groupList = groups
+        let members = Set(visible)
+        var iterator = reordered.makeIterator()
+        result.fileNames = result.fileNames.map { members.contains($0) ? (iterator.next() ?? $0) : $0 }
+        return result
+    }
+
+    static func playbackAlbum(preferred: UUID?, file: String, albums: [Album]) -> UUID? {
+        if let preferred, albums.contains(where: { $0.id == preferred && $0.fileNames.contains(file) }) { return preferred }
+        return albums.first(where: { $0.fileNames.contains(file) })?.id
+    }
+
+    static func renameAudio(_ reference: String, to input: String, albumID: UUID, albums: [Album], root: URL) throws -> (albums: [Album], reference: String) {
+        let source = try resolve(reference, in: root)
+        let ext = source.pathExtension
+        var base = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !ext.isEmpty && base.lowercased().hasSuffix("." + ext.lowercased()) { base = String(base.dropLast(ext.count + 1)) }
+        guard !base.isEmpty, !base.hasPrefix("."), !base.contains("/"), !base.contains("\\"),
+              !base.contains(":"), !base.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw failure("名称不能为空，不能以点开头或包含斜杠、冒号、换行等控制字符")
+        }
+        let name = base + (ext.isEmpty ? "" : "." + ext)
+        if source.lastPathComponent == name { return (albums, reference) }
+        let shared = albums.filter { $0.fileNames.contains(reference) }
+        guard !shared.isEmpty else { throw failure("音频不在专辑中") }
+        for album in shared where album.fileNames.contains(where: { $0 != reference && key(($0 as NSString).lastPathComponent) == key(name) }) {
+            throw failure("专辑「\(album.name)」已有同名音频，请换一个名称")
+        }
+        let new = trackPath(albumID: albumID, name: name)
+        var moves = [LibraryFileCopy(source: reference, destination: new)]
+        for subtitle in try sidecars(reference, root: root) {
+            moves.append(LibraryFileCopy(source: subtitle, destination: (new as NSString).deletingPathExtension + "." + (subtitle as NSString).pathExtension.lowercased()))
+        }
+        var updated = albums
+        for i in updated.indices {
+            updated[i].fileNames = updated[i].fileNames.map { $0 == reference ? new : $0 }
+            updated[i].groupList = updated[i].groupList.map {
+                var group = $0
+                group.fileNames = group.fileNames.map { $0 == reference ? new : $0 }
+                return group
+            }
+        }
+        try transact(root: root, next: updated, moves: moves)
+        return (updated, new)
+    }
+
     static func ordered(_ albums: [Album]) -> [Album] {
         albums.enumerated().sorted {
             let a = $0.element.pinRank, b = $1.element.pinRank
@@ -330,4 +412,9 @@ nonisolated func storageReference(_ url: URL) -> String {
 
 extension Notification.Name {
     nonisolated static let libraryFilesChanged = Notification.Name("Meloha.libraryFilesChanged")
+}
+
+extension Notification.Name {
+    nonisolated static let libraryAudioRenamed = Notification.Name("Meloha.libraryAudioRenamed")
+    nonisolated static let libraryAlbumOrderChanged = Notification.Name("Meloha.libraryAlbumOrderChanged")
 }

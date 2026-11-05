@@ -52,7 +52,7 @@ nonisolated struct Album: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
     var name: String
     /// 成员文件名（相对 Documents 的路径）。这是专辑的**全部**歌曲，
-    /// 分组只是给其中一部分打上归属，不重复存储也不改变这里的顺序。
+    /// 分组记录归属；手动调整组内顺序时，同步回填成员在播放队列中的位置。
     var fileNames: [String]
     /// 封面图文件名（相对 Documents），无封面时为 nil。
     var coverFileName: String?
@@ -127,4 +127,9 @@ nonisolated struct Album: Identifiable, Codable, Equatable, Sendable {
         self.tags = tags
         self.pinRank = pinRank
     }
+}
+
+nonisolated enum LibraryRoute: Hashable {
+    case album(UUID)
+    case uncategorized
 }
