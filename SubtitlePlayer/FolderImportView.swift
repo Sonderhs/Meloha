@@ -83,7 +83,7 @@ struct FolderImportSheet: View {
                     Label("同名字幕自动配对", systemImage: "captions.bubble")
                     Label("优先选用 cover、folder、artwork01 等封面，其余图片加入图片集", systemImage: "photo")
                 } footer: {
-                    Text("选择一个已解压的作品文件夹。支持 MP3、M4A、WAV、AAC、AIFF 和 SRT、VTT、LRC 字幕。不同专辑的同名音频保留原名；原文件保留。")
+                    Text("选择一个已解压的作品文件夹。支持 MP3、M4A、WAV、FLAC、M4B、AIFF 等音频和 SRT、VTT、LRC 字幕。不同专辑的同名音频保留原名；原文件保留。")
                 }
                 Section {
                     Picker("同一专辑内出现同名音频", selection: $duplicatePolicy) {

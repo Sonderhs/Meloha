@@ -28,7 +28,7 @@ nonisolated private struct FolderSourceFile {
 
 /// File IO stays off the main actor. Only files created by this import are rolled back.
 nonisolated enum FolderImportEngine {
-    static let audioExtensions = ["mp3", "m4a", "wav", "aac", "aiff"]
+    static let audioExtensions = LibraryStorage.audioExtensions
     static let subtitleExtensions = ["srt", "vtt", "lrc"]
     static let imageExtensions = ["jpg", "jpeg", "png", "heic", "heif", "webp", "gif"]
 
@@ -131,7 +131,7 @@ nonisolated enum FolderImportEngine {
         let audio = files.filter { audioExtensions.contains($0.ext) }
         guard !audio.isEmpty else {
             throw NSError(domain: "FolderImport", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "文件夹中没有支持的音频。支持 MP3、M4A、WAV、AAC、AIFF。"])
+                userInfo: [NSLocalizedDescriptionKey: "文件夹中没有支持的音频。支持 MP3、M4A、WAV、FLAC、M4B、AIFF 等音频。"])
         }
         let subtitles = files.filter { subtitleExtensions.contains($0.ext) }
         let byStem = Dictionary(grouping: subtitles, by: \.stem)

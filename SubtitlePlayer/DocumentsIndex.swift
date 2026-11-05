@@ -44,7 +44,7 @@ final class DocumentsIndex: ObservableObject {
         let names = (try? LibraryStorage.files(in: documentsURL)) ?? []
         fileNames = Set(names)
         audioFileNames = names.filter {
-            audioFileExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
+            LibraryStorage.isAudioReference($0)
         }
 
         // 预先算好每个音频基名对应的字幕格式，省得每行现查。

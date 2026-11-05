@@ -22,6 +22,32 @@ struct LibraryStorageChecks {
         }
         func exists(_ root: URL, _ path: String) -> Bool { fm.fileExists(atPath: root.appendingPathComponent(path).path) }
 
+        // Regression: an existing FLAC/AIF/etc. entry must not lock the entire library on upgrade.
+        let formats = try directory("LegacyFormats")
+        let media = ["song.FLAC", "book.m4b", "track.AIF", "track.aifc", "recording.caf", "extensionless", "legacy.custom"]
+        for name in media { try write(formats, name, "original bytes: " + name) }
+        try write(formats, "song.lrc", "FLAC subtitle")
+        try write(formats, "metadata.json", "preserve metadata")
+        try fm.createDirectory(at: formats.appendingPathComponent("directory.mp3"), withIntermediateDirectories: true)
+        let oldFormats = Album(name: "Mixed formats", fileNames: media + ["metadata.json", "directory.mp3", "missing.flac"],
+            groups: [AlbumGroup(name: "FLAC", fileNames: ["song.FLAC"])])
+        try JSONEncoder().encode([oldFormats]).write(to: formats.appendingPathComponent("albums.json"))
+        let newFormats = try LibraryStorage.migrate([oldFormats], root: formats)
+        precondition(newFormats[0].fileNames.filter { $0.hasPrefix("Albums/") }.count == media.count)
+        for name in media {
+            let path = newFormats[0].fileNames.first { ($0 as NSString).lastPathComponent == name }!
+            precondition(LibraryStorage.isAudioReference(path))
+            precondition(tryText(formats, path) == "original bytes: " + name)
+        }
+        let flac = newFormats[0].groupList[0].fileNames[0]
+        precondition(tryText(formats, (flac as NSString).deletingPathExtension + ".lrc") == "FLAC subtitle")
+        precondition(exists(formats, "metadata.json") && exists(formats, "directory.mp3"))
+        let formatPlan = try LibraryStorage.deletionPlan(newFormats, ids: [oldFormats.id], root: formats)
+        precondition(!formatPlan.paths.contains("metadata.json") && !formatPlan.paths.contains("directory.mp3"))
+        try LibraryStorage.transact(root: formats, next: [], removals: formatPlan.paths)
+        precondition(!exists(formats, flac) && exists(formats, "metadata.json") && exists(formats, "directory.mp3"))
+        print("Legacy format regression checks passed: FLAC, M4B, AIF, AIFC, CAF, missing/extensionless/unlisted files, subtitles and protected metadata.")
+
         // Old shared flat files become independent copies and retain group membership and subtitles.
         let root = try directory("Migration")
         try write(root, "01 ケ\u{3099}ーム.mp3", "audio")

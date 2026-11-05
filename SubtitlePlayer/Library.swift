@@ -638,7 +638,7 @@ struct LyricsView: View {
 // MARK: - 数据模型
 
 /// 音乐库识别的音频扩展名（导入、下载校验、分享打开都用这一份）。
-let audioFileExtensions = ["mp3", "m4a", "wav", "aac", "aiff"]
+let audioFileExtensions = LibraryStorage.audioExtensions
 
 /// 列出 Documents 内所有音频，按名称排序。
 /// 走 DocumentsIndex 的内存快照：这个函数会在 body 里被调用（如 uncategorizedURLs），

@@ -26,9 +26,24 @@ nonisolated struct AlbumDeletionPlan: Sendable {
 
 /// Stored references are paths relative to Documents. Display names always use the leaf name.
 nonisolated enum LibraryStorage {
-    static let audioExtensions = ["mp3", "m4a", "wav", "aac", "aiff"]
+    static let audioExtensions = ["mp3", "m4a", "wav", "aac", "aiff", "flac", "m4b", "aif", "aifc", "caf"]
     static let subtitleExtensions = ["srt", "vtt", "lrc"]
     static let imageExtensions = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "tiff", "bmp"]
+
+    /// Old album membership is the source of truth during migration, not a playback-format whitelist.
+    /// Never reinterpret library metadata, subtitles, images or backup archives as audio.
+    static func isLegacyMediaName(_ path: String) -> Bool {
+        let ext = (path as NSString).pathExtension.lowercased()
+        let protectedExtensions = imageExtensions + subtitleExtensions
+            + ["json", "plist", "melohabk", "txt", "xml", "db", "sqlite", "sqlite3", "zip", "pdf", "safetensors"]
+        return !protectedExtensions.contains(ext)
+    }
+
+    static func isAudioReference(_ path: String) -> Bool {
+        if audioExtensions.contains((path as NSString).pathExtension.lowercased()) { return true }
+        let parts = path.split(separator: "/")
+        return parts.count == 5 && parts[0] == "Albums" && parts[2] == "Audio" && isLegacyMediaName(path)
+    }
 
     static func key(_ name: String) -> String { name.precomposedStringWithCanonicalMapping.lowercased() }
 
@@ -110,13 +125,15 @@ nonisolated enum LibraryStorage {
         let exclusive = tracks.filter { !retained.contains(key($0)) }
         let exclusiveKeys = Set(exclusive.map(key))
         let otherAudio = try files(in: root).filter {
-            audioExtensions.contains(($0 as NSString).pathExtension.lowercased()) && !exclusiveKeys.contains(key($0))
+            isAudioReference($0) && !exclusiveKeys.contains(key($0))
         }
         let retainedBases = Set((remaining.flatMap(\.fileNames) + otherAudio).map { key(($0 as NSString).deletingPathExtension) })
         var paths = Set<String>()
         for track in exclusive {
-            guard audioExtensions.contains((track as NSString).pathExtension.lowercased()) else { throw failure("专辑包含无效的音频路径") }
-            _ = try resolve(track, in: root)
+            guard isAudioReference(track) else { continue }
+            let file = try resolve(track, in: root)
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+               (attributes[.type] as? FileAttributeType) != .typeRegular { continue }
             paths.insert(track)
             if !retainedBases.contains(key((track as NSString).deletingPathExtension)) {
                 paths.formUnion(try sidecars(track, root: root))
@@ -229,8 +246,9 @@ nonisolated enum LibraryStorage {
             var mapping: [String: String] = [:]
             for name in updated[i].fileNames where !name.hasPrefix("Albums/") {
                 let source = try resolve(name, in: root)
-                guard fm.fileExists(atPath: source.path) else { continue }
-                guard audioExtensions.contains(source.pathExtension.lowercased()) else { throw failure("旧专辑音频路径异常") }
+                guard let attributes = try? fm.attributesOfItem(atPath: source.path),
+                      (attributes[.type] as? FileAttributeType) == .typeRegular,
+                      isLegacyMediaName(name) else { continue }
                 let destination = trackPath(albumID: updated[i].id, name: source.lastPathComponent)
                 mapping[name] = destination
                 copies.append(LibraryFileCopy(source: name, destination: destination))
@@ -264,7 +282,7 @@ nonisolated enum LibraryStorage {
         let retained = Set(updated.flatMap { $0.fileNames + $0.imageList + [$0.coverFileName].compactMap { $0 } }.map(key))
         let obsoleteKeys = Set(obsolete.map(key))
         let looseAudio = try files(in: root).filter {
-            audioExtensions.contains(($0 as NSString).pathExtension.lowercased()) && !obsoleteKeys.contains(key($0))
+            isAudioReference($0) && !obsoleteKeys.contains(key($0))
         }
         let retainedBases = Set((updated.flatMap(\.fileNames) + looseAudio).map { key(($0 as NSString).deletingPathExtension) })
         let removals = obsolete.filter {
