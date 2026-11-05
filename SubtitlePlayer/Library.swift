@@ -1539,22 +1539,24 @@ struct AlbumDetailView: View {
     }
 
     /// 分组相关的弹窗 + 图片大图。每个都挂独立节点：同节点叠多个 presentation 会互相顶掉。
-    private func dialogLayer<V: View>(_ view: V) -> some View {
+    private var audioRenameAlert: some View {
+        Color.clear.alert("重命名音频", isPresented: Binding(
+            get: { renameTrackTarget != nil }, set: { if !$0 { renameTrackTarget = nil } }
+        ), presenting: renameTrackTarget) { url in
+            TextField("音频名称", text: $renameTrackText)
+            Button("保存") {
+                if let album { albumStore.renameAudio(storageReference(url), to: renameTrackText, in: album) }
+                renameTrackTarget = nil
+            }
+            Button("取消", role: .cancel) { renameTrackTarget = nil }
+        } message: { _ in
+            Text("保留原扩展名，同名字幕一起重命名。其他专辑共用这首音频时会同步更新。")
+        }
+    }
+
+    private func groupDialogLayer<V: View>(_ view: V) -> some View {
         view
-            .background(
-                Color.clear.alert("重命名音频", isPresented: Binding(
-                    get: { renameTrackTarget != nil }, set: { if !$0 { renameTrackTarget = nil } }
-                ), presenting: renameTrackTarget) { url in
-                    TextField("音频名称", text: $renameTrackText)
-                    Button("保存") {
-                        if let album { albumStore.renameAudio(storageReference(url), to: renameTrackText, in: album) }
-                        renameTrackTarget = nil
-                    }
-                    Button("取消", role: .cancel) { renameTrackTarget = nil }
-                } message: { _ in
-                    Text("保留原扩展名，同名字幕一起重命名。其他专辑共用这首音频时会同步更新。")
-                }
-            )
+            .background(audioRenameAlert)
             .background(
                 Color.clear.alert("新建分组", isPresented: $showNewGroupAlert) {
                     TextField("分组名称（如 CD1）", text: $groupNameInput)
@@ -1587,6 +1589,10 @@ struct AlbumDetailView: View {
                     moveDialogButtons
                 }
             )
+    }
+
+    private func dialogLayer<V: View>(_ view: V) -> some View {
+        groupDialogLayer(view)
             .background(
                 Color.clear.sheet(item: Binding(
                     get: { previewImageName.map { ImagePreviewTarget(fileName: $0) } },
@@ -2577,15 +2583,7 @@ struct UncategorizedView: View {
             }
         }
         .navigationTitle("未分类")
-        .background(
-            Color.clear.alert("重命名音频", isPresented: Binding(
-                get: { renameTrackTarget != nil }, set: { if !$0 { renameTrackTarget = nil } }
-            ), presenting: renameTrackTarget) { url in
-                TextField("音频名称", text: $renameTrackText)
-                Button("保存") { albumStore.renameAudio(storageReference(url), to: renameTrackText); renameTrackTarget = nil }
-                Button("取消", role: .cancel) { renameTrackTarget = nil }
-            } message: { _ in Text("保留原扩展名，同名字幕一起重命名。") }
-        )
+        .background(renameAlert)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -2633,6 +2631,16 @@ struct UncategorizedView: View {
         .toast($toastMessage)
         .onAppear { reload() }
         .onReceive(DocumentsIndex.shared.$revision) { _ in reload() }
+    }
+
+    private var renameAlert: some View {
+        Color.clear.alert("重命名音频", isPresented: Binding(
+            get: { renameTrackTarget != nil }, set: { if !$0 { renameTrackTarget = nil } }
+        ), presenting: renameTrackTarget) { url in
+            TextField("音频名称", text: $renameTrackText)
+            Button("保存") { albumStore.renameAudio(storageReference(url), to: renameTrackText); renameTrackTarget = nil }
+            Button("取消", role: .cancel) { renameTrackTarget = nil }
+        } message: { _ in Text("保留原扩展名，同名字幕一起重命名。") }
     }
 
     private func beginRename(_ url: URL) {

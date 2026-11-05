@@ -178,7 +178,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity)
     }
 
-    var body: some View {
+    private var mainContent: some View {
         ZStack {
             libraryView
                 .opacity(isPlayerMinimized ? 1 : 0)
@@ -228,6 +228,10 @@ struct ContentView: View {
                 Button("知道了") { albumStore.operationError = nil }
             } message: { Text(albumStore.operationError ?? "") }
         )
+    }
+
+    private var libraryEventContent: some View {
+        mainContent
         .onReceive(NotificationCenter.default.publisher(for: .libraryFilesChanged)) { _ in
             reconcileLibraryPlayback()
         }
@@ -253,6 +257,10 @@ struct ContentView: View {
         .onChange(of: isPlayerMinimized) { _, minimized in
             if minimized { returnToPlayingAlbum() }
         }
+    }
+
+    private var playbackEventContent: some View {
+        libraryEventContent
         .overlay(alignment: .topLeading) {
             // PiP 源图层：始终留在视图层级并持续渲染，不随播放器收起而销毁，
             // 否则画中画会失去内容源、控件失效。1×1、透明、不挡点击。
@@ -354,6 +362,10 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(appTheme.colorScheme)
+    }
+
+    var body: some View {
+        playbackEventContent
         .sheet(isPresented: $showLyrics) {
             LyricsView(subtitles: subtitles, currentIndex: currentLineIndex) { time in
                 // line.time 是原始字幕时间；换算回播放时间需加上偏移。
