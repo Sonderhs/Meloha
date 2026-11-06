@@ -28,6 +28,16 @@ struct AudioCompressionChecks {
         precondition(monoResult.channels == 1 && monoResult.compressedBytes < monoResult.originalBytes)
         let high = try await AudioCompression.prepare(source: source, reference: "source.wav", quality: .high, directory: folder)
         precondition(high.compressedBytes > compact.compressedBytes)
+        let highRate = folder.appendingPathComponent("high-rate.wav")
+        try makeWave(highRate, channels: 2, sampleRate: 96_000)
+        let resampled = try await AudioCompression.prepare(source: highRate, reference: "high-rate.wav", quality: .compact, directory: folder)
+        precondition(abs(resampled.duration - 8) < 0.01 && resampled.channels == 2)
+        let resampledFile = try AVAudioFile(forReading: resampled.file)
+        precondition(resampledFile.processingFormat.sampleRate == 48_000)
+        let flac = folder.appendingPathComponent("lossless.flac")
+        try makeWave(flac, channels: 2)
+        let flacResult = try await AudioCompression.prepare(source: flac, reference: "lossless.flac", quality: .compact, directory: folder)
+        precondition(flacResult.channels == 2 && flacResult.savedBytes > 0)
 
         // Existing compressed audio can be recompressed, retaining its embedded title.
         let annotated = folder.appendingPathComponent("annotated.m4a")
@@ -79,14 +89,25 @@ struct AudioCompressionChecks {
         print("Compression checks passed: stereo, mono, bitrate choices, duration, AAC recompression, metadata, larger-output skip, unsupported input, cancellation, originals retained.")
     }
 
-    static func makeWave(_ url: URL, channels: AVAudioChannelCount) throws {
-        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: channels)!
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48_000)!
-        buffer.frameLength = 48_000
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+    static func makeWave(_ url: URL, channels: AVAudioChannelCount, sampleRate: Int = 48_000) throws {
+        let format: AVAudioFormat
+        if channels == 3 {
+            format = AVAudioFormat(standardFormatWithSampleRate: Double(sampleRate), channelLayout: AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_MPEG_3_0_A)!)!
+        } else {
+            format = AVAudioFormat(standardFormatWithSampleRate: Double(sampleRate), channels: channels)!
+        }
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(sampleRate))!
+        buffer.frameLength = AVAudioFrameCount(sampleRate)
+        var settings = format.settings
+        settings[AVLinearPCMIsNonInterleaved] = false
+        if url.pathExtension == "flac" {
+            settings = [AVFormatIDKey: kAudioFormatFLAC, AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: channels, AVEncoderBitDepthHintKey: 16]
+        }
+        let file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
         for _ in 0..<8 {
             for c in 0..<Int(channels) {
-                for i in 0..<48_000 { buffer.floatChannelData![c][i] = Float(0.4 * sin(2 * .pi * Double(440 + c * 220) * Double(i) / 48_000)) }
+                for i in 0..<sampleRate { buffer.floatChannelData![c][i] = Float(0.4 * sin(2 * .pi * Double(440 + c * 220) * Double(i) / Double(sampleRate))) }
             }
             try file.write(from: buffer)
         }
