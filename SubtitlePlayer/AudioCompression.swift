@@ -67,21 +67,34 @@ nonisolated enum AudioCompression {
 
     private static func encode(source: URL, destination: URL, quality: AudioCompressionQuality,
                                progress: @escaping @Sendable (Double) -> Void) throws -> (duration: Double, channels: UInt32) {
-        let input = try AVAudioFile(forReading: source)
+        let input: AVAudioFile
+        do { input = try AVAudioFile(forReading: source) }
+        catch { throw AudioCompressionError.conversion("读取源音频：" + error.localizedDescription) }
         let format = input.processingFormat
         guard input.length > 0, format.sampleRate > 0 else { throw AudioCompressionError.invalidAudio }
         guard (1...2).contains(format.channelCount) else { throw AudioCompressionError.unsupportedChannels }
         let rate: Double = format.sampleRate <= 44_100 ? 44_100 : 48_000
-        guard let pcm = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate,
-                                     channels: format.channelCount, interleaved: false),
-              let converter = AVAudioConverter(from: format, to: pcm),
-              let inputBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_192),
-              let outputBuffer = AVAudioPCMBuffer(pcmFormat: pcm, frameCapacity: 8_192) else {
-            throw AudioCompressionError.invalidAudio
-        }
         let settings: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: rate,
             AVNumberOfChannelsKey: format.channelCount, AVEncoderBitRateKey: quality.bitRate]
-        let output = try AVAudioFile(forWriting: destination, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let output: AVAudioFile
+        do { output = try AVAudioFile(forWriting: destination, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false) }
+        catch { throw AudioCompressionError.conversion("创建 AAC 编码器：" + error.localizedDescription) }
+        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_192) else { throw AudioCompressionError.invalidAudio }
+        if format == output.processingFormat {
+            while true {
+                try Task.checkCancellation()
+                try input.read(into: inputBuffer)
+                if inputBuffer.frameLength == 0 { break }
+                do { try output.write(from: inputBuffer) }
+                catch { throw AudioCompressionError.conversion("写入 AAC 音频：" + error.localizedDescription) }
+                progress(Double(input.framePosition) / Double(input.length) * 0.9)
+            }
+            return (Double(input.length) / format.sampleRate, format.channelCount)
+        }
+        guard let converter = AVAudioConverter(from: format, to: output.processingFormat),
+              let outputBuffer = AVAudioPCMBuffer(pcmFormat: output.processingFormat, frameCapacity: 8_192) else {
+            throw AudioCompressionError.invalidAudio
+        }
         converter.sampleRateConverterQuality = AVAudioQuality.max.rawValue
         var reachedEnd = false
         var lastProgress = -1
@@ -107,9 +120,12 @@ nonisolated enum AudioCompression {
                     return nil
                 }
             }
-            if let readError { throw readError }
-            if let conversionError { throw conversionError }
-            if outputBuffer.frameLength > 0 { try output.write(from: outputBuffer) }
+            if let readError { throw AudioCompressionError.conversion("读取音频数据：" + readError.localizedDescription) }
+            if let conversionError { throw AudioCompressionError.conversion("重采样：" + conversionError.localizedDescription) }
+            if outputBuffer.frameLength > 0 {
+                do { try output.write(from: outputBuffer) }
+                catch { throw AudioCompressionError.conversion("写入重采样音频：" + error.localizedDescription) }
+            }
             let percent = Int(Double(input.framePosition) / Double(input.length) * 90)
             if percent != lastProgress { lastProgress = percent; progress(Double(percent) / 100) }
             switch status {
