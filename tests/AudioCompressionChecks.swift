@@ -65,6 +65,16 @@ struct AudioCompressionChecks {
         }
         do { _ = try await cancelled.value; fatalError("Cancelled compression completed") }
         catch is CancellationError {}
+        let beforeCancellation = Set(try fm.contentsOfDirectory(atPath: folder.path))
+        let midCancelled = Task {
+            try await AudioCompression.prepare(source: source, reference: "source.wav", quality: .compact, directory: folder) { fraction in
+                if fraction > 0.1 { withUnsafeCurrentTask { $0?.cancel() } }
+            }
+        }
+        do { _ = try await midCancelled.value; fatalError("Mid-stream cancellation completed") }
+        catch is CancellationError {}
+        let afterCancellation = Set(try fm.contentsOfDirectory(atPath: folder.path))
+        precondition(afterCancellation == beforeCancellation)
         precondition(fm.fileExists(atPath: source.path) && fm.fileExists(atPath: compact.file.path))
         print("Compression checks passed: stereo, mono, bitrate choices, duration, AAC recompression, metadata, larger-output skip, unsupported input, cancellation, originals retained.")
     }

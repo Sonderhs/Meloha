@@ -30,12 +30,17 @@ nonisolated enum AudioCompression {
             try? fm.removeItem(at: raw)
             if !succeeded { try? fm.removeItem(at: destination) }
         }
-        let info = try autoreleasepool {
-            try encode(source: source, destination: raw, quality: quality, progress: progress)
-        }
+        let info: (duration: Double, channels: UInt32)
+        do {
+            info = try autoreleasepool { try encode(source: source, destination: raw, quality: quality, progress: progress) }
+        } catch is CancellationError { throw CancellationError() }
+        catch let error as AudioCompressionError { throw error }
+        catch { throw AudioCompressionError.conversion("编码音频：" + error.localizedDescription) }
         try Task.checkCancellation()
         // Remux metadata without re-encoding so embedded artwork/title are retained.
-        let metadata = try await AVURLAsset(url: source).load(.metadata)
+        let metadata: [AVMetadataItem]
+        do { metadata = try await AVURLAsset(url: source).load(.metadata) }
+        catch { throw AudioCompressionError.conversion("读取音频标签：" + error.localizedDescription) }
         if metadata.isEmpty {
             try fm.moveItem(at: raw, to: destination)
         } else {
@@ -43,11 +48,14 @@ nonisolated enum AudioCompression {
                 throw AudioCompressionError.invalidAudio
             }
             session.metadata = metadata
-            try await session.export(to: destination, as: .m4a)
+            do { try await session.export(to: destination, as: .m4a) }
+            catch { throw AudioCompressionError.conversion("保存音频标签：" + error.localizedDescription) }
         }
         try Task.checkCancellation()
         // Decode the entire result, rather than trusting a readable header or export success.
-        try autoreleasepool { try validate(file: destination, duration: info.duration, channels: info.channels) }
+        do { try autoreleasepool { try validate(file: destination, duration: info.duration, channels: info.channels) } }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw AudioCompressionError.conversion("校验压缩音频：" + error.localizedDescription) }
         let size = try fm.attributesOfItem(atPath: destination.path)[.size] as? NSNumber
         guard let compressed = size?.int64Value, compressed > 0 else { throw AudioCompressionError.invalidAudio }
         guard compressed < bytes else { throw AudioCompressionError.largerOutput }
