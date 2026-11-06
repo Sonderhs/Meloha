@@ -81,6 +81,7 @@ nonisolated enum AudioCompression {
         catch { throw AudioCompressionError.conversion("创建 AAC 编码器：" + error.localizedDescription) }
         guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_192) else { throw AudioCompressionError.invalidAudio }
         if format == output.processingFormat {
+            var lastPercent = -1
             while input.framePosition < input.length {
                 try Task.checkCancellation()
                 let frames = AVAudioFrameCount(min(Int64(inputBuffer.frameCapacity), input.length - input.framePosition))
@@ -88,7 +89,8 @@ nonisolated enum AudioCompression {
                 if inputBuffer.frameLength == 0 { break }
                 do { try output.write(from: inputBuffer) }
                 catch { throw AudioCompressionError.conversion("写入 AAC 音频：" + error.localizedDescription) }
-                progress(Double(input.framePosition) / Double(input.length) * 0.9)
+                let percent = Int(Double(input.framePosition) / Double(input.length) * 90)
+                if percent != lastPercent { lastPercent = percent; progress(Double(percent) / 100) }
             }
             return (Double(input.length) / format.sampleRate, format.channelCount)
         }

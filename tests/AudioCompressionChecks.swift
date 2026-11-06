@@ -92,7 +92,7 @@ struct AudioCompressionChecks {
     static func makeWave(_ url: URL, channels: AVAudioChannelCount, sampleRate: Int = 48_000) throws {
         let format: AVAudioFormat
         if channels == 3 {
-            format = AVAudioFormat(standardFormatWithSampleRate: Double(sampleRate), channelLayout: AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_MPEG_3_0_A)!)!
+            format = AVAudioFormat(standardFormatWithSampleRate: Double(sampleRate), channelLayout: AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_MPEG_3_0_A)!)
         } else {
             format = AVAudioFormat(standardFormatWithSampleRate: Double(sampleRate), channels: channels)!
         }
