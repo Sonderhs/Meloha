@@ -81,9 +81,10 @@ nonisolated enum AudioCompression {
         catch { throw AudioCompressionError.conversion("创建 AAC 编码器：" + error.localizedDescription) }
         guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_192) else { throw AudioCompressionError.invalidAudio }
         if format == output.processingFormat {
-            while true {
+            while input.framePosition < input.length {
                 try Task.checkCancellation()
-                try input.read(into: inputBuffer)
+                let frames = AVAudioFrameCount(min(Int64(inputBuffer.frameCapacity), input.length - input.framePosition))
+                try input.read(into: inputBuffer, frameCount: frames)
                 if inputBuffer.frameLength == 0 { break }
                 do { try output.write(from: inputBuffer) }
                 catch { throw AudioCompressionError.conversion("写入 AAC 音频：" + error.localizedDescription) }
@@ -104,9 +105,10 @@ nonisolated enum AudioCompression {
             var readError: Error?
             outputBuffer.frameLength = 0
             let status = converter.convert(to: outputBuffer, error: &conversionError) { frames, state in
-                if reachedEnd { state.pointee = .endOfStream; return nil }
+                if reachedEnd || input.framePosition >= input.length { state.pointee = .endOfStream; return nil }
                 do {
-                    try input.read(into: inputBuffer, frameCount: min(frames, inputBuffer.frameCapacity))
+                    let remaining = AVAudioFrameCount(min(Int64(inputBuffer.frameCapacity), input.length - input.framePosition))
+                    try input.read(into: inputBuffer, frameCount: min(frames, remaining))
                     if inputBuffer.frameLength == 0 {
                         reachedEnd = true
                         state.pointee = .endOfStream
@@ -144,9 +146,10 @@ nonisolated enum AudioCompression {
             throw AudioCompressionError.invalidAudio
         }
         var frames: Int64 = 0
-        while true {
+        while input.framePosition < input.length {
             try Task.checkCancellation()
-            try input.read(into: buffer)
+            let count = AVAudioFrameCount(min(Int64(buffer.frameCapacity), input.length - input.framePosition))
+            try input.read(into: buffer, frameCount: count)
             if buffer.frameLength == 0 { break }
             frames += Int64(buffer.frameLength)
         }
