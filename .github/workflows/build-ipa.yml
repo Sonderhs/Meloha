@@ -29,13 +29,18 @@ jobs:
 
       - name: Check folder import
         run: |
-          xcrun swiftc SubtitlePlayer/AlbumModels.swift SubtitlePlayer/LibraryStorage.swift SubtitlePlayer/FolderImport.swift tests/FolderImportChecks.swift -o "$RUNNER_TEMP/folder-import-checks"
+          xcrun swiftc SubtitlePlayer/AlbumModels.swift SubtitlePlayer/CompressionModels.swift SubtitlePlayer/LibraryStorage.swift SubtitlePlayer/FolderImport.swift tests/FolderImportChecks.swift -o "$RUNNER_TEMP/folder-import-checks"
           "$RUNNER_TEMP/folder-import-checks"
 
       - name: Check library storage and backups
         run: |
-          xcrun swiftc SubtitlePlayer/AlbumModels.swift SubtitlePlayer/LibraryStorage.swift SubtitlePlayer/BackupArchive.swift tests/LibraryStorageChecks.swift -o "$RUNNER_TEMP/library-storage-checks"
+          xcrun swiftc SubtitlePlayer/AlbumModels.swift SubtitlePlayer/CompressionModels.swift SubtitlePlayer/LibraryStorage.swift SubtitlePlayer/BackupArchive.swift tests/LibraryStorageChecks.swift -o "$RUNNER_TEMP/library-storage-checks"
           "$RUNNER_TEMP/library-storage-checks"
+
+      - name: Check audio compression
+        run: |
+          xcrun swiftc SubtitlePlayer/CompressionModels.swift SubtitlePlayer/AudioCompression.swift tests/AudioCompressionChecks.swift -o "$RUNNER_TEMP/audio-compression-checks"
+          "$RUNNER_TEMP/audio-compression-checks"
 
       - name: Prepare Metal compiler
         run: |

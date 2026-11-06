@@ -1242,6 +1242,21 @@ final class AlbumStore: ObservableObject {
         NotificationCenter.default.post(name: .libraryAlbumOrderChanged, object: album.id)
     }
 
+    func applyCompressedAudio(_ results: [CompressedAudio]) async throws {
+        guard !isBusy, canModify(), let root = documentsDirectory else { throw LibraryStorage.failure("音乐库暂时不能修改，请稍后重试") }
+        isBusy = true
+        busyMessage = "正在替换压缩音频和字幕…"
+        defer { isBusy = false }
+        let snapshot = albums
+        let replacement = try await Task.detached(priority: .userInitiated) {
+            try LibraryStorage.installCompressed(results, albums: snapshot, root: root)
+        }.value
+        albums = replacement.albums
+        DocumentsIndex.shared.refresh()
+        NotificationCenter.default.post(name: .libraryAudioReplaced, object: nil, userInfo: ["mapping": replacement.mapping])
+        operationMessage = "已替换 \(results.count) 首压缩音频"
+    }
+
     func renameAudio(_ reference: String, to name: String, in album: Album? = nil) {
         guard canModify(), !isBusy, let root = documentsDirectory else { return }
         let snapshot = albums
@@ -1405,6 +1420,7 @@ struct AlbumDetailView: View {
     let onSelect: ([URL], Int, UIImage?) -> Void
 
     @State private var trackEditMode: EditMode = .inactive
+    @State private var compressionSelection: CompressionSelection?
     @State private var renameTrackTarget: URL?
     @State private var renameTrackText = ""
     @State private var showAddSongs = false
@@ -1449,6 +1465,13 @@ struct AlbumDetailView: View {
                 .toolbar { toolbarContent }
         )
         .environment(\.editMode, $trackEditMode)
+        .background(compressionSheet)
+    }
+
+    private var compressionSheet: some View {
+        Color.clear.sheet(item: $compressionSelection) { target in
+            AudioCompressionSheet(albumStore: albumStore, references: target.references)
+        }
     }
 
     /// 导入相关的 presentation（加歌、音频导入、字幕导入、封面/图片选择）。
@@ -1802,6 +1825,9 @@ struct AlbumDetailView: View {
                     } label: {
                         Label("从已有音频选择", systemImage: "music.note.list")
                     }
+                    Button("压缩本专辑音频", systemImage: "arrow.down.circle") {
+                        compressionSelection = CompressionSelection(references: albumTracks.map { storageReference($0) })
+                    }.disabled(albumTracks.isEmpty)
                     Divider()
                     Button {
                         groupNameInput = ""
@@ -2083,6 +2109,9 @@ struct AlbumDetailView: View {
                     }
                 }
                 .contextMenu {
+                    Button("压缩音频", systemImage: "arrow.down.circle") {
+                        compressionSelection = CompressionSelection(references: [fileName])
+                    }
                     Button {
                         renameTrackText = url.deletingPathExtension().lastPathComponent
                         renameTrackTarget = url
@@ -2533,6 +2562,7 @@ struct UncategorizedView: View {
     let onSelect: ([URL], Int, UIImage?) -> Void
 
     @State private var files: [URL] = []
+    @State private var compressionSelection: CompressionSelection?
     @State private var renameTrackTarget: URL?
     @State private var renameTrackText = ""
     @State private var showAudioImporter = false
@@ -2566,6 +2596,9 @@ struct UncategorizedView: View {
                             }
                         }
                         .contextMenu {
+                            Button("压缩音频", systemImage: "arrow.down.circle") {
+                                compressionSelection = CompressionSelection(references: [storageReference(url)])
+                            }
                             Button("重命名音频", systemImage: "pencil") { beginRename(url) }
                         }
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
@@ -2583,11 +2616,15 @@ struct UncategorizedView: View {
             }
         }
         .navigationTitle("未分类")
+        .background(compressionSheet)
         .background(renameAlert)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    Button("批量压缩音频", systemImage: "arrow.down.circle") {
+                        compressionSelection = CompressionSelection(references: files.map { storageReference($0) })
+                    }.disabled(files.isEmpty)
                     Button {
                         showAudioImporter = true
                     } label: {
@@ -2641,6 +2678,12 @@ struct UncategorizedView: View {
             Button("保存") { albumStore.renameAudio(storageReference(url), to: renameTrackText); renameTrackTarget = nil }
             Button("取消", role: .cancel) { renameTrackTarget = nil }
         } message: { _ in Text("保留原扩展名，同名字幕一起重命名。") }
+    }
+
+    private var compressionSheet: some View {
+        Color.clear.sheet(item: $compressionSelection) { target in
+            AudioCompressionSheet(albumStore: albumStore, references: target.references)
+        }
     }
 
     private func beginRename(_ url: URL) {

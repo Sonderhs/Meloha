@@ -15,6 +15,7 @@ nonisolated struct LibraryTransaction: Codable {
     var copies: [LibraryFileCopy]
     var removals: [String]
     var moves: [LibraryFileCopy]? = nil
+    var imports: [String]? = nil
 }
 
 nonisolated struct AlbumDeletionPlan: Sendable {
@@ -155,7 +156,7 @@ nonisolated enum LibraryStorage {
     }
 
     /// A write-ahead journal makes copying/moving files and publishing albums.json recoverable.
-    static func transact(root: URL, next: [Album], copies: [LibraryFileCopy] = [], removals: [String] = [], moves: [LibraryFileCopy] = [],
+    static func transact(root: URL, next: [Album], copies: [LibraryFileCopy] = [], removals: [String] = [], moves: [LibraryFileCopy] = [], imports: [LibraryFileImport] = [],
                          progress: @Sendable (String) -> Void = { _ in }) throws {
         let fm = FileManager.default
         try recover(root: root)
@@ -163,17 +164,30 @@ nonisolated enum LibraryStorage {
         // File-only changes can leave album metadata unchanged. Make the atomic publish
         // distinguishable from the previous file so recovery can still detect the commit.
         if nextAlbums == (try? Data(contentsOf: root.appendingPathComponent("albums.json"))) { nextAlbums.append(0x0A) }
-        let transaction = LibraryTransaction(nextAlbums: nextAlbums, copies: copies, removals: removals, moves: moves)
+        let transaction = LibraryTransaction(nextAlbums: nextAlbums, copies: copies, removals: removals, moves: moves, imports: imports.map(\.destination))
+        let destinations = (copies + moves).map(\.destination) + imports.map(\.destination)
+        guard Set(destinations.map(key)).count == destinations.count else { throw failure("操作包含重复目标文件") }
         for copy in copies + moves {
             _ = try resolve(copy.source, in: root)
             let destination = try resolve(copy.destination, in: root)
             guard !fm.fileExists(atPath: destination.path) else { throw failure("目标文件已存在，操作已停止") }
         }
         for path in removals { _ = try resolve(path, in: root) }
+        for item in imports {
+            let attributes = try fm.attributesOfItem(atPath: item.source.path)
+            guard (attributes[.type] as? FileAttributeType) == .typeRegular else { throw failure("压缩文件不可用") }
+            let target = try resolve(item.destination, in: root)
+            guard !fm.fileExists(atPath: target.path) else { throw failure("目标文件已存在") }
+        }
         let journal = root.appendingPathComponent(".library-transaction", isDirectory: true)
         try fm.createDirectory(at: journal, withIntermediateDirectories: true)
         try JSONEncoder().encode(transaction).write(to: journal.appendingPathComponent("state.json"), options: .atomic)
         do {
+            for item in imports {
+                let target = try resolve(item.destination, in: root)
+                try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fm.copyItem(at: item.source, to: target)
+            }
             for (i, copy) in copies.enumerated() {
                 progress("正在整理文件 \(i + 1)/\(copies.count)")
                 let destination = try resolve(copy.destination, in: root)
@@ -217,6 +231,11 @@ nonisolated enum LibraryStorage {
             try Data().write(to: marker, options: .atomic)
         }
         if !committed {
+            for path in transaction.imports ?? [] {
+                let target = try resolve(path, in: root)
+                if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
+                removeEmptyParents(of: target, root: root)
+            }
             for (i, path) in transaction.removals.enumerated() {
                 let staged = journal.appendingPathComponent("removed-\(i)")
                 if fm.fileExists(atPath: staged.path) {
@@ -317,6 +336,59 @@ nonisolated enum LibraryStorage {
         }.sorted()
         try transact(root: root, next: updated, copies: copies, removals: removals, progress: progress)
         return updated
+    }
+
+    /// Publish verified previews and update every shared reference in one recoverable transaction.
+    static func installCompressed(_ results: [CompressedAudio], albums: [Album], root: URL) throws -> (albums: [Album], mapping: [String: String]) {
+        guard !results.isEmpty else { throw failure("没有可以替换的压缩音频") }
+        let fm = FileManager.default
+        let originals = Set(results.map { key($0.reference) })
+        guard originals.count == results.count else { throw failure("重复选择了同一首音频") }
+        var mapping: [String: String] = [:]
+        var imports: [LibraryFileImport] = []
+        var copies: [LibraryFileCopy] = []
+        var removals = Set<String>()
+        let remainingAudio = try files(in: root).filter { isAudioReference($0) && !originals.contains(key($0)) }
+        let remainingStems = Set(remainingAudio.map { key(($0 as NSString).deletingPathExtension) })
+        for result in results {
+            guard isAudioReference(result.reference) else { throw failure("源文件不是音频") }
+            let source = try resolve(result.reference, in: root)
+            let old = try fm.attributesOfItem(atPath: source.path)
+            let encoded = try fm.attributesOfItem(atPath: result.file.path)
+            guard (old[.type] as? FileAttributeType) == .typeRegular,
+                  (old[.size] as? NSNumber)?.int64Value == result.originalBytes,
+                  (old[.modificationDate] as? Date) == result.originalModified else {
+                throw failure("「\(source.lastPathComponent)」在压缩后已发生变化，请重新压缩")
+            }
+            guard (encoded[.type] as? FileAttributeType) == .typeRegular,
+                  (encoded[.size] as? NSNumber)?.int64Value == result.compressedBytes,
+                  result.compressedBytes > 0, result.compressedBytes < result.originalBytes else {
+                throw failure("压缩文件无效或没有节省空间，原文件已保留")
+            }
+            let owner = albums.first { $0.fileNames.contains(result.reference) }?.id ?? UUID()
+            let name = source.deletingPathExtension().lastPathComponent + ".m4a"
+            let target = trackPath(albumID: owner, name: name)
+            mapping[result.reference] = target
+            imports.append(LibraryFileImport(source: result.file, destination: target))
+            removals.insert(result.reference)
+            for subtitle in try sidecars(result.reference, root: root) {
+                // Preserve case and bytes; separate directories avoid same-name collisions.
+                let ext = (subtitle as NSString).pathExtension
+                copies.append(LibraryFileCopy(source: subtitle, destination: (target as NSString).deletingPathExtension + "." + ext))
+                if !remainingStems.contains(key((result.reference as NSString).deletingPathExtension)) { removals.insert(subtitle) }
+            }
+        }
+        var updated = albums
+        for i in updated.indices {
+            updated[i].fileNames = updated[i].fileNames.map { mapping[$0] ?? $0 }
+            updated[i].groupList = updated[i].groupList.map { group in
+                var copy = group
+                copy.fileNames = group.fileNames.map { mapping[$0] ?? $0 }
+                return copy
+            }
+        }
+        try transact(root: root, next: updated, copies: copies, removals: removals.sorted(), imports: imports)
+        return (updated, mapping)
     }
 
     static func reordered(_ values: [String], from offsets: IndexSet, to destination: Int) -> [String] {
@@ -427,4 +499,5 @@ extension Notification.Name {
 extension Notification.Name {
     nonisolated static let libraryAudioRenamed = Notification.Name("Meloha.libraryAudioRenamed")
     nonisolated static let libraryAlbumOrderChanged = Notification.Name("Meloha.libraryAlbumOrderChanged")
+    nonisolated static let libraryAudioReplaced = Notification.Name("Meloha.libraryAudioReplaced")
 }

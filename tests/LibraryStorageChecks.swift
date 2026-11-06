@@ -296,6 +296,65 @@ struct LibraryStorageChecks {
         do { try BackupManager.restore(from: bad, documents: badRoot); fatalError("Traversal backup accepted") }
         catch {}
         precondition((try? LibraryStorage.files(in: badRoot).isEmpty) == true)
+        // Compression replacement preserves shared references, group order and all subtitle formats.
+        let compressionRoot = try directory("CompressionReplace")
+        let compressionPreview = try directory("CompressionPreview")
+        try write(compressionRoot, "one.mp3", "original audio payload that is longer")
+        try write(compressionRoot, "one.wav", "same-stem other audio retained")
+        for ext in ["LRC", "srt", "vtt"] { try write(compressionRoot, "one." + ext, "subtitle " + ext) }
+        try write(compressionPreview, "compressed.m4a", "small")
+        let sourceAttributes = try fm.attributesOfItem(atPath: compressionRoot.appendingPathComponent("one.mp3").path)
+        let prepared = CompressedAudio(reference: "one.mp3", file: compressionPreview.appendingPathComponent("compressed.m4a"),
+            originalBytes: (sourceAttributes[.size] as! NSNumber).int64Value,
+            originalModified: sourceAttributes[.modificationDate] as! Date, compressedBytes: 5, duration: 8, channels: 2)
+        let compressedAlbum = Album(name: "Compressed", fileNames: ["before.mp3", "one.mp3", "after.mp3"],
+            groups: [AlbumGroup(name: "Group", fileNames: ["one.mp3", "after.mp3"])], sort: .manual, tags: ["tag"], pinRank: 0)
+        let sharedCompressed = Album(name: "Shared", fileNames: ["one.mp3"])
+        let installed = try LibraryStorage.installCompressed([prepared], albums: [compressedAlbum, sharedCompressed], root: compressionRoot)
+        let newReference = installed.mapping["one.mp3"]!
+        precondition(installed.albums[0].fileNames == ["before.mp3", newReference, "after.mp3"])
+        precondition(installed.albums[0].groupList[0].fileNames == [newReference, "after.mp3"])
+        precondition(installed.albums[0].pinRank == 0 && installed.albums[0].tagList == ["tag"])
+        precondition(installed.albums[1].fileNames == [newReference])
+        precondition(tryText(compressionRoot, newReference) == "small" && !exists(compressionRoot, "one.mp3"))
+        precondition(exists(compressionRoot, "one.wav"))
+        for ext in ["LRC", "srt", "vtt"] {
+            precondition(tryText(compressionRoot, (newReference as NSString).deletingPathExtension + "." + ext) == "subtitle " + ext)
+            precondition(exists(compressionRoot, "one." + ext), "Subtitle still used by WAV must remain")
+        }
+        precondition(exists(compressionPreview, "compressed.m4a"))
+        // A stale preview must not replace a changed original.
+        try write(compressionRoot, "one.mp3", "changed")
+        do { _ = try LibraryStorage.installCompressed([prepared], albums: [], root: compressionRoot); fatalError("Stale preview accepted") }
+        catch {}
+        precondition(tryText(compressionRoot, "one.mp3") == "changed")
+
+        // Metadata failure rolls back imports/removals, preserving originals and preview for retry.
+        let compressionFail = try directory("CompressionFail")
+        try write(compressionFail, "old.wav", "original long audio content")
+        try write(compressionFail, "old.lrc", "original subtitle")
+        try fm.createDirectory(at: compressionFail.appendingPathComponent("albums.json"), withIntermediateDirectories: true)
+        let oldAttributes = try fm.attributesOfItem(atPath: compressionFail.appendingPathComponent("old.wav").path)
+        let failPrepared = CompressedAudio(reference: "old.wav", file: prepared.file,
+            originalBytes: (oldAttributes[.size] as! NSNumber).int64Value,
+            originalModified: oldAttributes[.modificationDate] as! Date, compressedBytes: 5, duration: 8, channels: 2)
+        do { _ = try LibraryStorage.installCompressed([failPrepared], albums: [], root: compressionFail); fatalError("Compression metadata failure accepted") }
+        catch {}
+        precondition(tryText(compressionFail, "old.wav") == "original long audio content")
+        precondition(tryText(compressionFail, "old.lrc") == "original subtitle")
+        precondition(!exists(compressionFail, ".library-transaction"))
+        let remainingCompressionFiles = try LibraryStorage.files(in: compressionFail)
+        precondition(!remainingCompressionFiles.contains { $0.hasPrefix("Albums/") })
+
+        let compressionCrash = try directory("CompressionCrash")
+        let crashTarget = LibraryStorage.trackPath(albumID: UUID(), name: "new.m4a")
+        try write(compressionCrash, crashTarget, "partially imported")
+        try write(compressionCrash, ".library-transaction/removed-0", "original audio")
+        let compressionState = LibraryTransaction(nextAlbums: Data("[]".utf8), copies: [], removals: ["old.wav"], imports: [crashTarget])
+        try JSONEncoder().encode(compressionState).write(to: compressionCrash.appendingPathComponent(".library-transaction/state.json"))
+        try LibraryStorage.recover(root: compressionCrash)
+        precondition(tryText(compressionCrash, "old.wav") == "original audio" && !exists(compressionCrash, crashTarget))
+        print("Compression storage checks passed: shared references, group order, subtitles, stale preview rejection, rollback, interrupted imports and original preservation.")
         print("Library checks passed: migration, shared deletion, batch deletion, rollback, crash recovery, pin persistence, backup round-trip, legacy restore, path safety.")
     }
 

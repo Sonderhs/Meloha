@@ -230,8 +230,16 @@ struct ContentView: View {
         )
     }
 
-    private var libraryEventContent: some View {
+    private var compressionEventContent: some View {
         mainContent
+            .onReceive(NotificationCenter.default.publisher(for: .libraryAudioReplaced)) { notification in
+                if let mapping = notification.userInfo?["mapping"] as? [String: String] { reconcileCompressedPlayback(mapping) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .libraryPreviewWillPlay)) { _ in pause() }
+    }
+
+    private var libraryEventContent: some View {
+        compressionEventContent
         .onReceive(NotificationCenter.default.publisher(for: .libraryFilesChanged)) { _ in
             reconcileLibraryPlayback()
         }
@@ -839,6 +847,19 @@ struct ContentView: View {
         DocumentsIndex.shared.refresh()
     }
 
+    private func reconcileCompressedPlayback(_ mapping: [String: String]) {
+        guard let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        playlist = playlist.map { url in mapping[storageReference(url)].map { root.appendingPathComponent($0) } ?? url }
+        if let url = currentAudioURL, let replacement = mapping[storageReference(url)] {
+            let position = audioPlayer?.currentTime ?? currentTime
+            let wasPlaying = audioPlayer?.isPlaying ?? false
+            loadAudio(from: root.appendingPathComponent(replacement))
+            seek(to: min(position, duration))
+            if wasPlaying { play() }
+        }
+        currentIndex = currentAudioURL.flatMap { playlist.firstIndex(of: $0) }
+    }
+
     private func returnToPlayingAlbum() {
         guard let url = currentAudioURL else { return }
         let id = LibraryStorage.playbackAlbum(preferred: playbackSourceAlbumID,
@@ -1397,6 +1418,7 @@ struct AudioFilesView: View {
     @ObservedObject var backgroundStore: BackgroundStore
     @Binding var navigationPath: [LibraryRoute]
     @State private var libraryMode: LibraryMode = .albums
+    @State private var showAudioCompression = false
     @State private var showNewAlbumAlert = false
     @State private var showFolderImport = false
     @State private var isSelectingAlbums = false
@@ -1805,6 +1827,15 @@ struct AudioFilesView: View {
             }
 
             Section("工具") {
+                Button { showAudioCompression = true } label: {
+                    Label("压缩音频", systemImage: "arrow.down.circle")
+                }
+                .listRowBackground(rowBackground)
+                .background(
+                    Color.clear.sheet(isPresented: $showAudioCompression) {
+                        AudioCompressionSheet(albumStore: albumStore)
+                    }
+                )
                 NavigationLink {
                     MetronomeView()
                 } label: {
