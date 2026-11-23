@@ -53,7 +53,8 @@ final class FolderImportController: ObservableObject {
                     throw error
                 }
                 status = "已创建专辑「\(result.name)」"
-                summary = "\(result.tracks.count) 首音频 · \(result.subtitleCount) 份字幕 · \(result.images.count + (result.cover == nil ? 0 : 1)) 张图片"
+                let videos = result.tracks.filter(LibraryStorage.isVideoReference).count
+                summary = "\(result.tracks.count - videos) 首音频 · \(videos) 部视频 · \(result.subtitleCount) 份字幕 · \(result.images.count + (result.cover == nil ? 0 : 1)) 张图片"
                 issues = result.issues
                 fraction = 1
             } catch is CancellationError {
@@ -100,10 +101,10 @@ struct FolderImportSheet: View {
                     Label("同名字幕自动配对", systemImage: "captions.bubble")
                     Label("优先选用 cover、folder、artwork01 等封面，其余图片加入图片集", systemImage: "photo")
                 } footer: {
-                    Text("选择一个已解压的作品文件夹。支持 MP3、M4A、WAV、FLAC、M4B、AIFF 等音频和 SRT、VTT、LRC 字幕。不同专辑的同名音频保留原名；原文件保留。")
+                    Text("选择一个已解压的作品文件夹。支持 MP3、M4A、WAV、FLAC、M4B、AIFF 等音频、MP4/MOV/M4V 视频，以及 SRT、VTT、LRC 字幕。不同专辑的同名文件保留原名；原文件保留。")
                 }
                 Section {
-                    Picker("同一专辑内出现同名音频", selection: $duplicatePolicy) {
+                    Picker("同一专辑内出现同名文件", selection: $duplicatePolicy) {
                         ForEach(DuplicateImportPolicy.allCases, id: \.self) { policy in
                             Text(policy.label).tag(policy)
                         }

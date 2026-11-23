@@ -656,6 +656,14 @@ func documentsAudioURLs() -> [URL] {
         .map { documentsURL.appendingPathComponent($0) }
 }
 
+func documentsMediaURLs() -> [URL] {
+    guard let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return [] }
+    let index = DocumentsIndex.shared
+    return documentsAudioURLs() + index.videoFileNames.map { root.appendingPathComponent($0) }
+}
+
+private var videoContentTypes: [UTType] { LibraryStorage.videoExtensions.compactMap { UTType(filenameExtension: $0) } }
+
 /// 支持的字幕扩展名，顺序即匹配优先级：SRT → VTT → LRC。
 let subtitleFileExtensions = ["srt", "vtt", "lrc"]
 
@@ -941,8 +949,8 @@ final class AlbumStore: ObservableObject {
         let retained = Set(albums.filter { !ids.contains($0.id) }.flatMap(\.fileNames).map(LibraryStorage.key))
         let tracks = Set(selected.flatMap(\.fileNames).map(LibraryStorage.key))
         let shared = tracks.intersection(retained).count
-        return "将删除 \(selected.count) 个专辑、\(tracks.count - shared) 首音频，以及对应字幕、封面和图片集。"
-            + (shared > 0 ? "\n另有 \(shared) 首仍被其他专辑引用，将予以保留。" : "")
+        return "将删除 \(selected.count) 个专辑、\(tracks.count - shared) 个媒体文件，以及对应字幕、封面和图片集。"
+            + (shared > 0 ? "\n另有 \(shared) 个文件仍被其他专辑引用，将予以保留。" : "")
             + "\n删除后无法撤销，导入来源文件夹不受影响。"
     }
 
@@ -963,7 +971,7 @@ final class AlbumStore: ObservableObject {
                 CoverImageCache.shared.removeAll()
                 DocumentsIndex.shared.refresh()
                 NotificationCenter.default.post(name: .libraryFilesChanged, object: nil)
-                operationMessage = "已删除 \(plan.albumCount) 个专辑、\(plan.trackCount) 首音频"
+                operationMessage = "已删除 \(plan.albumCount) 个专辑、\(plan.trackCount) 个媒体文件"
                 if FileManager.default.fileExists(atPath: root.appendingPathComponent(".library-transaction").path) {
                     operationMessage = "专辑已删除，部分文件将在下次启动时继续清理"
                 }
@@ -1215,14 +1223,13 @@ final class AlbumStore: ObservableObject {
 
     /// 拖动排序「未分组」区。偏移量是相对未分组子集的，得映射回 fileNames 的全局下标，
     /// 否则有分组时会挪错歌。
-    func moveUngrouped(in album: Album, fromOffsets: IndexSet, toOffset: Int) {
+    func moveUngrouped(in album: Album, visible: [String], fromOffsets: IndexSet, toOffset: Int) {
         guard canModify() else { return }
         guard let index = albums.firstIndex(where: { $0.id == album.id }) else { return }
-        let ungrouped = albums[index].ungroupedFileNames
+        let ungrouped = visible
         guard !ungrouped.isEmpty else { return }
 
-        var reordered = ungrouped
-        reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        let reordered = LibraryStorage.reordered(ungrouped, from: fromOffsets, to: toOffset)
 
         // 把重排后的未分组序列按原有位置回填，分组内的歌保持原位不动。
         let ungroupedSet = Set(ungrouped)
@@ -1257,11 +1264,61 @@ final class AlbumStore: ObservableObject {
         operationMessage = "已替换 \(results.count) 首压缩音频"
     }
 
-    func renameAudio(_ reference: String, to name: String, in album: Album? = nil) {
+    func importVideoFiles(_ urls: [URL], albumID: UUID?) async -> String {
+        guard !urls.isEmpty else { return "" }
+        let leases = urls.map(SelectedFolderAccess.init(url:))
+        var imported = 0
+        var errors: [String] = []
+        for lease in leases {
+            do {
+                let name = lease.url.lastPathComponent
+                guard LibraryStorage.isVideoReference(name) else { throw LibraryStorage.failure("请选择 MP4、MOV 或 M4V 文件") }
+                try await importMediaFile(lease.url, named: name, albumID: albumID)
+                imported += 1
+            } catch { errors.append("\(lease.url.lastPathComponent)：\(error.localizedDescription)") }
+        }
+        return errors.isEmpty ? "已导入 \(imported) 部视频" :
+            "已导入 \(imported) 部视频，\(errors.count) 部失败。\n" + (errors.first ?? "")
+    }
+
+    /// Validate the same local copy that will be installed, then publish files and album metadata together.
+    func importMediaFile(_ url: URL, named name: String, albumID: UUID?) async throws {
+        guard !isBusy, !isReadOnly, let root = documentsDirectory, canModify() else {
+            throw LibraryStorage.failure("音乐库暂时不能修改，请稍后重试")
+        }
+        let index = albums.firstIndex { $0.id == albumID }
+        if albumID != nil, index == nil { throw LibraryStorage.failure("所选专辑已不存在") }
+        guard LibraryStorage.safePath(name), !name.contains("/") else { throw LibraryStorage.failure("文件名称无效") }
+        let reference = LibraryStorage.trackPath(albumID: albumID ?? UUID(), name: name)
+        var updated = albums
+        if let index { updated[index].fileNames.append(reference) }
+        let next = updated
+        isBusy = true
+        busyMessage = "正在导入文件…"
+        defer { isBusy = false }
+        let worker = Task.detached(priority: .userInitiated) {
+            let staged = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension((name as NSString).pathExtension)
+            defer { try? FileManager.default.removeItem(at: staged) }
+            try FolderImportEngine.copy(url, to: staged)
+            let asset = AVURLAsset(url: staged)
+            let mediaType: AVMediaType = LibraryStorage.isVideoReference(reference) ? .video : .audio
+            guard try await asset.load(.isPlayable), !(try await asset.loadTracks(withMediaType: mediaType)).isEmpty else {
+                throw LibraryStorage.failure("当前设备无法播放这个文件")
+            }
+            try Task.checkCancellation()
+            try LibraryStorage.transact(root: root, next: next, imports: [LibraryFileImport(source: staged, destination: reference)])
+        }
+        try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+        albums = next
+        DocumentsIndex.shared.refresh()
+    }
+
+    func renameMedia(_ reference: String, to name: String, in album: Album? = nil) {
         guard canModify(), !isBusy, let root = documentsDirectory else { return }
         let snapshot = albums
         isBusy = true
-        busyMessage = "正在重命名音频和字幕…"
+        busyMessage = "正在重命名文件和字幕…"
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
@@ -1271,7 +1328,8 @@ final class AlbumStore: ObservableObject {
                 DocumentsIndex.shared.refresh()
                 NotificationCenter.default.post(name: .libraryAudioRenamed, object: nil,
                     userInfo: ["old": reference, "new": result.reference])
-                operationMessage = "音频和同名字幕已重命名"
+                if LibraryStorage.isVideoReference(reference) { VideoResume.rename(from: reference, to: result.reference) }
+                operationMessage = "文件和同名字幕已重命名"
             } catch { operationError = error.localizedDescription }
             isBusy = false
         }
@@ -1363,14 +1421,20 @@ final class AlbumStore: ObservableObject {
     static func clearFileAttributeCaches() {
         modificationDateCache.removeAll()
         durationCache.removeAll()
+        pendingVideoDurations.removeAll()
     }
 
     /// 时长缓存：读时长要解析文件头，歌一多每次排序都读会明显卡顿。
     /// 随索引刷新一并清空（见 clearFileAttributeCaches）。
     private static var durationCache: [String: TimeInterval] = [:]
+    private static var pendingVideoDurations: [String: UUID] = [:]
 
     private static func cachedDuration(of url: URL) -> TimeInterval {
         if let cached = durationCache[url.path] { return cached }
+        if LibraryStorage.videoExtensions.contains(url.pathExtension.lowercased()) {
+            loadVideoDuration(at: url)
+            return 0
+        }
         // AVAudioFile 只读文件头，比 AVAsset 异步加载轻，够排序用。
         let seconds: TimeInterval
         if let file = try? AVAudioFile(forReading: url), file.fileFormat.sampleRate > 0 {
@@ -1380,6 +1444,21 @@ final class AlbumStore: ObservableObject {
         }
         durationCache[url.path] = seconds
         return seconds
+    }
+
+    private static func loadVideoDuration(at url: URL) {
+        let path = url.path
+        guard pendingVideoDurations[path] == nil else { return }
+        let request = UUID()
+        pendingVideoDurations[path] = request
+        Task { @MainActor in
+            let asset = AVURLAsset(url: url)
+            let seconds = (try? await asset.load(.duration).seconds) ?? 0
+            guard pendingVideoDurations[path] == request else { return }
+            pendingVideoDurations[path] = nil
+            durationCache[path] = seconds.isFinite ? max(0, seconds) : 0
+            DocumentsIndex.shared.notifyMetadataChanged()
+        }
     }
 
     /// 设置排序方式。切到非手动时不改动 fileNames，只改显示顺序；
@@ -1408,7 +1487,7 @@ final class AlbumStore: ObservableObject {
     /// 供「未分类」虚拟专辑使用，让删掉文件页后松散音频仍可被浏览、播放。
     func uncategorizedURLs() -> [URL] {
         let member = Set(albums.flatMap { $0.fileNames })
-        return documentsAudioURLs().filter { !member.contains(storageReference($0)) }
+        return documentsMediaURLs().filter { !member.contains(storageReference($0)) }
     }
 }
 
@@ -1419,11 +1498,13 @@ struct AlbumDetailView: View {
     @ObservedObject var albumStore: AlbumStore
     let onSelect: ([URL], Int, UIImage?) -> Void
 
+    @ObservedObject private var documentsIndex = DocumentsIndex.shared
     @State private var trackEditMode: EditMode = .inactive
     @State private var compressionSelection: CompressionSelection?
     @State private var renameTrackTarget: URL?
     @State private var renameTrackText = ""
     @State private var showAddSongs = false
+    @State private var showVideoImporter = false
     @State private var showAudioImporter = false
     @State private var pendingAudioImports: [URL] = []
     @State private var showDuplicateAudioChoice = false
@@ -1466,6 +1547,15 @@ struct AlbumDetailView: View {
         )
         .environment(\.editMode, $trackEditMode)
         .background(compressionSheet)
+        .background(videoPickerSheet)
+    }
+
+    private var videoPickerSheet: some View {
+        Color.clear.sheet(isPresented: $showVideoImporter) {
+            AudioDocumentPicker(isPresented: $showVideoImporter, contentTypes: videoContentTypes) { urls in
+                Task { toastMessage = await albumStore.importVideoFiles(urls, albumID: albumID) }
+            }.ignoresSafeArea()
+        }
     }
 
     private var compressionSheet: some View {
@@ -1563,17 +1653,17 @@ struct AlbumDetailView: View {
 
     /// 分组相关的弹窗 + 图片大图。每个都挂独立节点：同节点叠多个 presentation 会互相顶掉。
     private var audioRenameAlert: some View {
-        Color.clear.alert("重命名音频", isPresented: Binding(
+        Color.clear.alert("重命名文件", isPresented: Binding(
             get: { renameTrackTarget != nil }, set: { if !$0 { renameTrackTarget = nil } }
         ), presenting: renameTrackTarget) { url in
-            TextField("音频名称", text: $renameTrackText)
+            TextField("文件名称", text: $renameTrackText)
             Button("保存") {
-                if let album { albumStore.renameAudio(storageReference(url), to: renameTrackText, in: album) }
+                if let album { albumStore.renameMedia(storageReference(url), to: renameTrackText, in: album) }
                 renameTrackTarget = nil
             }
             Button("取消", role: .cancel) { renameTrackTarget = nil }
         } message: { _ in
-            Text("保留原扩展名，同名字幕一起重命名。其他专辑共用这首音频时会同步更新。")
+            Text("保留原扩展名，同名字幕一起重命名。其他专辑共用此文件时会同步更新。")
         }
     }
 
@@ -1823,11 +1913,12 @@ struct AlbumDetailView: View {
                     Button {
                         showAddSongs = true
                     } label: {
-                        Label("从已有音频选择", systemImage: "music.note.list")
+                        Label("从已有音视频选择", systemImage: "music.note.list")
                     }
+                    Button("从文件导入视频", systemImage: "video") { showVideoImporter = true }
                     Button("压缩本专辑音频", systemImage: "arrow.down.circle") {
-                        compressionSelection = CompressionSelection(references: albumTracks.map { storageReference($0) })
-                    }.disabled(albumTracks.isEmpty)
+                        compressionSelection = CompressionSelection(references: albumTracks.map { storageReference($0) }.filter(LibraryStorage.isAudioReference))
+                    }.disabled(!albumTracks.contains { !LibraryStorage.isVideoReference(storageReference($0)) })
                     Divider()
                     Button {
                         groupNameInput = ""
@@ -1999,6 +2090,7 @@ struct AlbumDetailView: View {
     @ViewBuilder
     private func tracksSections(_ album: Album) -> some View {
         let allTracks = albumStore.tracks(in: album)
+        let audioQueue = allTracks.filter { !LibraryStorage.isVideoReference(storageReference($0)) }
         let mode = album.sortMode
         // 未分组的歌也要按当前排序显示，所以从已排序的 allTracks 里筛，而不是直接用 fileNames。
         let groupedNames = Set(album.groupList.flatMap(\.fileNames))
@@ -2006,18 +2098,18 @@ struct AlbumDetailView: View {
 
         if allTracks.isEmpty {
             Section {
-                Text("还没有歌曲，点右上角 + 添加")
+                Text("还没有音视频，点右上角 + 添加")
                     .foregroundStyle(.secondary)
             }
         } else {
             if !ungrouped.isEmpty {
-                Section(album.groupList.isEmpty ? "歌曲" : "未分组") {
+                Section(album.groupList.isEmpty ? "音视频" : "未分组") {
                     ForEach(ungrouped, id: \.self) { url in
-                        trackRow(url: url, album: album, allTracks: allTracks)
+                        trackRow(url: url, album: album, audioQueue: audioQueue)
                     }
                     // 拖动排序只在手动模式下有意义：其他模式下顺序由规则决定，拖了也会被覆盖。
                     .onMove(perform: mode == .manual ? { fromOffsets, toOffset in
-                        albumStore.moveUngrouped(in: album, fromOffsets: fromOffsets, toOffset: toOffset)
+                        albumStore.moveUngrouped(in: album, visible: ungrouped.map { storageReference($0) }, fromOffsets: fromOffsets, toOffset: toOffset)
                     } : nil)
                 }
             }
@@ -2027,12 +2119,12 @@ struct AlbumDetailView: View {
                     if expandedGroups.contains(group.id) {
                         let groupTracks = albumStore.tracks(in: group, sortedBy: mode)
                         if groupTracks.isEmpty {
-                            Text("这个分组还没有歌，从上面左滑歌曲加进来")
+                            Text("这个分组还没有内容，可在列表中将音视频移入")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         } else {
                             ForEach(groupTracks, id: \.self) { url in
-                                trackRow(url: url, album: album, allTracks: allTracks)
+                                trackRow(url: url, album: album, audioQueue: audioQueue)
                             }
                             .onMove(perform: mode == .manual ? { offsets, destination in
                                 albumStore.moveGroupTracks(in: album, group: group,
@@ -2089,58 +2181,47 @@ struct AlbumDetailView: View {
     }
 
     /// 一行歌曲。点播放（队列=整张专辑）；左滑移除；右滑选分组。
-    private func trackRow(url: URL, album: Album, allTracks: [URL]) -> some View {
+    private func trackRow(url: URL, album: Album, audioQueue: [URL]) -> some View {
         let fileName = storageReference(url)
-        return Group {
-            if let index = allTracks.firstIndex(of: url) {
-                Button {
-                    onSelect(allTracks, index, albumStore.coverImage(for: album))
-                } label: {
-                    HStack {
-                        Label {
-                            Text(url.deletingPathExtension().lastPathComponent)
-                        } icon: {
-                            Image(systemName: "music.note")
-                        }
-
-                        Spacer()
-
-                        SubtitleBadge(audioURL: url)
-                    }
-                }
-                .contextMenu {
-                    Button("压缩音频", systemImage: "arrow.down.circle") {
-                        compressionSelection = CompressionSelection(references: [fileName])
-                    }
-                    Button {
-                        renameTrackText = url.deletingPathExtension().lastPathComponent
-                        renameTrackTarget = url
-                    } label: { Label("重命名音频", systemImage: "pencil") }
-                }
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button(role: .destructive) {
-                        albumStore.removeFile(fileName, from: album)
-                    } label: {
-                        Label("移除", systemImage: "trash")
-                    }
-                }
-                .swipeActions(edge: .leading) {
-                    Button {
-                        renameTrackText = url.deletingPathExtension().lastPathComponent
-                        renameTrackTarget = url
-                    } label: { Label("重命名", systemImage: "pencil") }
-                    .tint(.orange)
-                    if !album.groupList.isEmpty {
-                        Button {
-                            moveTarget = fileName
-                        } label: {
-                            Label("分组", systemImage: "folder")
-                        }
-                        .tint(.blue)
-                    }
-                }
+        let isVideo = LibraryStorage.isVideoReference(fileName)
+        return Button {
+            if isVideo { VideoPlaybackTarget.open(url) }
+            else if let index = audioQueue.firstIndex(of: url) {
+                onSelect(audioQueue, index, albumStore.coverImage(for: album))
+            }
+        } label: {
+            HStack {
+                MediaRowTitle(url: url)
+                Spacer()
+                SubtitleBadge(audioURL: url)
             }
         }
+        .contextMenu {
+            if !isVideo {
+                Button("压缩音频", systemImage: "arrow.down.circle") {
+                    compressionSelection = CompressionSelection(references: [fileName])
+                }
+            }
+            Button("重命名", systemImage: "pencil") { beginTrackRename(url) }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) {
+                albumStore.removeFile(fileName, from: album)
+            } label: {
+                Label("移除", systemImage: "trash")
+            }
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            Button("重命名", systemImage: "pencil") { beginTrackRename(url) }.tint(.orange)
+            if !album.groupList.isEmpty {
+                Button("分组", systemImage: "folder") { moveTarget = fileName }.tint(.blue)
+            }
+        }
+    }
+
+    private func beginTrackRename(_ url: URL) {
+        renameTrackText = url.deletingPathExtension().lastPathComponent
+        renameTrackTarget = url
     }
 
     private func toggleGroup(_ id: UUID) {
@@ -2566,16 +2647,19 @@ struct UncategorizedView: View {
     @State private var renameTrackTarget: URL?
     @State private var renameTrackText = ""
     @State private var showAudioImporter = false
+    @State private var showVideoImporter = false
     @StateObject private var subtitleImport = SubtitleImportCoordinator()
     @State private var toastMessage: String?
 
-    var body: some View {
+    private var audioQueue: [URL] { files.filter { !LibraryStorage.isVideoReference(storageReference($0)) } }
+
+    private var fileList: some View {
         Group {
             if files.isEmpty {
                 ContentUnavailableView {
-                    Label("没有未分类音频", systemImage: "tray")
+                    Label("没有未分类文件", systemImage: "tray")
                 } description: {
-                    Text("所有音频都已归入专辑。点右上角 + 可以导入音频或字幕。")
+                    Text("点右上角 + 导入音频、视频或字幕。")
                 } actions: {
                     Button {
                         showAudioImporter = true
@@ -2585,21 +2669,21 @@ struct UncategorizedView: View {
                 }
             } else {
                 List {
-                    ForEach(Array(files.enumerated()), id: \.element) { index, url in
+                    ForEach(files, id: \.self) { url in
+                        let isVideo = LibraryStorage.isVideoReference(storageReference(url))
                         Button {
-                            onSelect(files, index, nil)
+                            if isVideo { VideoPlaybackTarget.open(url) }
+                            else if let index = audioQueue.firstIndex(of: url) { onSelect(audioQueue, index, nil) }
                         } label: {
-                            Label {
-                                Text(url.deletingPathExtension().lastPathComponent)
-                            } icon: {
-                                Image(systemName: "waveform")
-                            }
+                            HStack { MediaRowTitle(url: url); Spacer(); SubtitleBadge(audioURL: url) }
                         }
                         .contextMenu {
-                            Button("压缩音频", systemImage: "arrow.down.circle") {
-                                compressionSelection = CompressionSelection(references: [storageReference(url)])
+                            if !isVideo {
+                                Button("压缩音频", systemImage: "arrow.down.circle") {
+                                    compressionSelection = CompressionSelection(references: [storageReference(url)])
+                                }
                             }
-                            Button("重命名音频", systemImage: "pencil") { beginRename(url) }
+                            Button("重命名", systemImage: "pencil") { beginRename(url) }
                         }
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
                             Button("重命名", systemImage: "pencil") { beginRename(url) }.tint(.orange)
@@ -2615,16 +2699,28 @@ struct UncategorizedView: View {
                 }
             }
         }
+    }
+
+    var body: some View {
+        fileList
         .navigationTitle("未分类")
         .background(compressionSheet)
         .background(renameAlert)
+        .background(
+            Color.clear.sheet(isPresented: $showVideoImporter) {
+                AudioDocumentPicker(isPresented: $showVideoImporter, contentTypes: videoContentTypes) { urls in
+                    Task { toastMessage = await albumStore.importVideoFiles(urls, albumID: nil) }
+                }.ignoresSafeArea()
+            }
+        )
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button("批量压缩音频", systemImage: "arrow.down.circle") {
-                        compressionSelection = CompressionSelection(references: files.map { storageReference($0) })
-                    }.disabled(files.isEmpty)
+                        compressionSelection = CompressionSelection(references: audioQueue.map { storageReference($0) })
+                    }.disabled(audioQueue.isEmpty)
+                    Button("导入视频", systemImage: "video") { showVideoImporter = true }
                     Button {
                         showAudioImporter = true
                     } label: {
@@ -2661,7 +2757,7 @@ struct UncategorizedView: View {
         // 字幕导入（选择器 + 配对页）。未分类页的候选是全库音频：字幕可能给任意一首歌配。
         .subtitleImportFlow(
             subtitleImport,
-            candidates: { documentsAudioURLs() },
+            candidates: { documentsMediaURLs() },
             toast: $toastMessage,
             onFinish: { reload() }
         )
@@ -2671,11 +2767,11 @@ struct UncategorizedView: View {
     }
 
     private var renameAlert: some View {
-        Color.clear.alert("重命名音频", isPresented: Binding(
+        Color.clear.alert("重命名文件", isPresented: Binding(
             get: { renameTrackTarget != nil }, set: { if !$0 { renameTrackTarget = nil } }
         ), presenting: renameTrackTarget) { url in
-            TextField("音频名称", text: $renameTrackText)
-            Button("保存") { albumStore.renameAudio(storageReference(url), to: renameTrackText); renameTrackTarget = nil }
+            TextField("文件名称", text: $renameTrackText)
+            Button("保存") { albumStore.renameMedia(storageReference(url), to: renameTrackText); renameTrackTarget = nil }
             Button("取消", role: .cancel) { renameTrackTarget = nil }
         } message: { _ in Text("保留原扩展名，同名字幕一起重命名。") }
     }
@@ -2698,13 +2794,15 @@ struct UncategorizedView: View {
     /// 删除音频，连同同名字幕（.lrc/.srt/.vtt）一并删除。
     /// 库里的文件都在 Documents 内（可写），不再有只读的内置示例需要特殊处理。
     private func delete(_ url: URL) {
-        let base = url.deletingPathExtension()
+        let reference = storageReference(url)
+        let stem = LibraryStorage.key((reference as NSString).deletingPathExtension)
+        let sharesSubtitle = documentsMediaURLs().contains {
+            $0 != url && LibraryStorage.key((storageReference($0) as NSString).deletingPathExtension) == stem
+        }
         var urlsToDelete = [url]
-        for ext in subtitleFileExtensions {
-            let sub = base.appendingPathExtension(ext)
-            if FileManager.default.fileExists(atPath: sub.path) {
-                urlsToDelete.append(sub)
-            }
+        if !sharesSubtitle, let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+           let sidecars = try? LibraryStorage.sidecars(reference, root: root) {
+            urlsToDelete += sidecars.map { root.appendingPathComponent($0) }
         }
         for u in urlsToDelete {
             try? FileManager.default.removeItem(at: u)
@@ -2731,9 +2829,9 @@ struct AddSongsView: View {
             let memberNames = Set(album?.fileNames ?? [])
 
             AudioPickerList(
-                sections: AudioPickerSection.flat(documentsAudioURLs()),
-                rowIcon: "music.note",
-                emptyDescription: "先在专辑里用「从文件导入音频」添加",
+                sections: AudioPickerSection.flat(documentsMediaURLs()),
+                rowIcon: "folder",
+                emptyDescription: "先从文件导入音频或视频",
                 accessory: { url in
                     // 已在本专辑里的显示勾选；点行切换加入/移出。
                     Image(systemName: memberNames.contains(storageReference(url))

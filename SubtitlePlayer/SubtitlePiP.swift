@@ -111,6 +111,10 @@ final class SubtitlePiPController: NSObject, ObservableObject {
     }
 
     /// 开启 / 关闭画中画。
+    func stopIfActive() {
+        if let pipController, pipController.isPictureInPictureActive { pipController.stopPictureInPicture() }
+    }
+
     func toggle() {
         guard let pipController else {
             statusMessage = "画中画尚未就绪"

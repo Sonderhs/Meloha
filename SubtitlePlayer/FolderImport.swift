@@ -141,28 +141,28 @@ nonisolated enum FolderImportEngine {
         defer { if !completed { cleanup(result.createdFiles, documents: documents) } }
         progress("正在扫描文件夹…", nil)
         let files = try scan(folder, issues: &result.issues)
-        let audio = files.filter { audioExtensions.contains($0.ext) }
-        guard !audio.isEmpty else {
+        let media = files.filter { audioExtensions.contains($0.ext) || LibraryStorage.videoExtensions.contains($0.ext) }
+        guard !media.isEmpty else {
             throw NSError(domain: "FolderImport", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "文件夹中没有支持的音频。支持 MP3、M4A、WAV、FLAC、M4B、AIFF 等音频。"])
+                userInfo: [NSLocalizedDescriptionKey: "文件夹中没有支持的音频或视频。"])
         }
         let subtitles = files.filter { subtitleExtensions.contains($0.ext) }
         let byStem = Dictionary(grouping: subtitles, by: \.stem)
-        let audioCounts = Dictionary(grouping: audio, by: \.stem).mapValues(\.count)
+        let mediaCounts = Dictionary(grouping: media, by: \.stem).mapValues(\.count)
         var usedSubtitles = Set<String>()
         var importedNames = Set<String>()
         let images = files.filter { imageExtensions.contains($0.ext) }.sorted {
             let left = coverRank($0), right = coverRank($1)
             return left != right ? left < right : $0.path.localizedStandardCompare($1.path) == .orderedAscending
         }
-        let total = audio.count + images.count
+        let total = media.count + images.count
         var count = 0
-        for file in audio {
+        for file in media {
             try Task.checkCancellation()
             progress("正在导入 \(file.path)", Double(count) / Double(total))
             let filename = file.url.lastPathComponent
             if duplicatePolicy == .skip && importedNames.contains(key(filename)) {
-                result.issues.append("\(file.path)：已按所选规则跳过同名音频")
+                result.issues.append("\(file.path)：已按所选规则跳过同名文件")
                 count += 1
                 continue
             }
@@ -193,7 +193,7 @@ nonisolated enum FolderImportEngine {
                 let global = matches.filter { $0.ext == ext }
                 // Separate subtitle folders are supported only when the pairing is unambiguous.
                 let match = local.count == 1 ? local.first
-                    : (local.isEmpty && audioCounts[file.stem] == 1 && global.count == 1 ? global.first : nil)
+                    : (local.isEmpty && mediaCounts[file.stem] == 1 && global.count == 1 ? global.first : nil)
                 guard let subtitle = match else { continue }
                 let subtitleDestination = destination.deletingPathExtension().appendingPathExtension(ext)
                 do {
@@ -211,7 +211,7 @@ nonisolated enum FolderImportEngine {
         }
         guard !result.tracks.isEmpty else {
             throw NSError(domain: "FolderImport", code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "音频全部导入失败。" + (result.issues.first.map { "\n" + $0 } ?? "")])
+                userInfo: [NSLocalizedDescriptionKey: "音视频全部导入失败。" + (result.issues.first.map { "\n" + $0 } ?? "")])
         }
         for image in images {
             try Task.checkCancellation()
@@ -237,7 +237,7 @@ nonisolated enum FolderImportEngine {
             count += 1
         }
         for subtitle in subtitles where !usedSubtitles.contains(subtitle.path) {
-            result.issues.append("\(subtitle.path)：未找到唯一对应的音频，已跳过")
+            result.issues.append("\(subtitle.path)：未找到唯一对应的音视频文件，已跳过")
         }
         try Task.checkCancellation()
         progress("正在保存专辑…", 1)

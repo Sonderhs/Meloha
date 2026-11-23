@@ -89,6 +89,20 @@ struct FolderImportChecks {
             }.value
             fatalError("Empty folder was accepted")
         } catch { precondition((error as NSError).domain == "FolderImport") }
+        let mixed = root.appendingPathComponent("Mixed")
+        let videos = mixed.appendingPathComponent("Videos")
+        try fm.createDirectory(at: videos, withIntermediateDirectories: true)
+        try Data("audio".utf8).write(to: mixed.appendingPathComponent("clip.mp3"))
+        try Data("video".utf8).write(to: videos.appendingPathComponent("clip.MOV"))
+        try Data("subtitle".utf8).write(to: videos.appendingPathComponent("clip.srt"))
+        let mixedResult = try FolderImportEngine.run(folder: mixed, documents: documents) { _, _ in }
+        precondition(mixedResult.tracks.filter(LibraryStorage.isAudioReference).count == 1)
+        let videoTracks = mixedResult.tracks.filter(LibraryStorage.isVideoReference)
+        precondition(videoTracks.count == 1 && videoTracks[0].contains("/Video/"))
+        precondition(mixedResult.groups.contains { $0.fileNames == videoTracks })
+        let videoSubtitle = documents.appendingPathComponent(videoTracks[0])
+            .deletingPathExtension().appendingPathExtension("srt")
+        precondition(fm.fileExists(atPath: videoSubtitle.path))
         print("Folder import checks passed: Unicode, collisions, pairing, groups, images, repeat import, cancellation rollback, empty folder.")
     }
 }

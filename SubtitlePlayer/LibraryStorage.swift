@@ -29,6 +29,7 @@ nonisolated struct AlbumDeletionPlan: Sendable {
 /// Stored references are paths relative to Documents. Display names always use the leaf name.
 nonisolated enum LibraryStorage {
     static let audioExtensions = ["mp3", "m4a", "wav", "aac", "aiff", "flac", "m4b", "aif", "aifc", "caf"]
+    static let videoExtensions = ["mp4", "mov", "m4v"]
     static let subtitleExtensions = ["srt", "vtt", "lrc"]
     static let imageExtensions = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "tiff", "bmp"]
 
@@ -41,7 +42,16 @@ nonisolated enum LibraryStorage {
         return !protectedExtensions.contains(ext)
     }
 
+    static func isVideoReference(_ path: String) -> Bool {
+        videoExtensions.contains((path as NSString).pathExtension.lowercased())
+    }
+
+    static func isMediaReference(_ path: String) -> Bool {
+        isVideoReference(path) || isAudioReference(path)
+    }
+
     static func isAudioReference(_ path: String) -> Bool {
+        guard !isVideoReference(path) else { return false }
         if audioExtensions.contains((path as NSString).pathExtension.lowercased()) { return true }
         let parts = path.split(separator: "/")
         return parts.count == 5 && parts[0] == "Albums" && parts[2] == "Audio" && isLegacyMediaName(path)
@@ -77,7 +87,8 @@ nonisolated enum LibraryStorage {
     }
 
     static func trackPath(albumID: UUID, name: String, trackID: UUID = UUID()) -> String {
-        "Albums/\(albumID.uuidString)/Audio/\(trackID.uuidString)/\(name)"
+        let folder = isVideoReference(name) ? "Video" : "Audio"
+        return "Albums/\(albumID.uuidString)/\(folder)/\(trackID.uuidString)/\(name)"
     }
 
     static func imagePath(albumID: UUID, name: String = UUID().uuidString + ".jpg") -> String {
@@ -127,12 +138,12 @@ nonisolated enum LibraryStorage {
         let exclusive = tracks.filter { !retained.contains(key($0)) }
         let exclusiveKeys = Set(exclusive.map(key))
         let otherAudio = try files(in: root).filter {
-            isAudioReference($0) && !exclusiveKeys.contains(key($0))
+            isMediaReference($0) && !exclusiveKeys.contains(key($0))
         }
         let retainedBases = Set((remaining.flatMap(\.fileNames) + otherAudio).map { key(($0 as NSString).deletingPathExtension) })
         var paths = Set<String>()
         for track in exclusive {
-            guard isAudioReference(track) else { continue }
+            guard isMediaReference(track) else { continue }
             let file = try resolve(track, in: root)
             if let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
                (attributes[.type] as? FileAttributeType) != .typeRegular { continue }
@@ -327,7 +338,7 @@ nonisolated enum LibraryStorage {
         let retained = Set(updated.flatMap { $0.fileNames + $0.imageList + [$0.coverFileName].compactMap { $0 } }.map(key))
         let obsoleteKeys = Set(obsolete.map(key))
         let looseAudio = try files(in: root).filter {
-            isAudioReference($0) && !obsoleteKeys.contains(key($0))
+            isMediaReference($0) && !obsoleteKeys.contains(key($0))
         }
         let retainedBases = Set((updated.flatMap(\.fileNames) + looseAudio).map { key(($0 as NSString).deletingPathExtension) })
         let removals = obsolete.filter {
@@ -348,7 +359,7 @@ nonisolated enum LibraryStorage {
         var imports: [LibraryFileImport] = []
         var copies: [LibraryFileCopy] = []
         var removals = Set<String>()
-        let remainingAudio = try files(in: root).filter { isAudioReference($0) && !originals.contains(key($0)) }
+        let remainingAudio = try files(in: root).filter { isMediaReference($0) && !originals.contains(key($0)) }
         let remainingStems = Set(remainingAudio.map { key(($0 as NSString).deletingPathExtension) })
         for result in results {
             guard isAudioReference(result.reference) else { throw failure("源文件不是音频") }
@@ -429,16 +440,16 @@ nonisolated enum LibraryStorage {
         let name = base + (ext.isEmpty ? "" : "." + ext)
         if source.lastPathComponent == name { return (albums, reference) }
         let shared = albums.filter { $0.fileNames.contains(reference) }
-        guard isAudioReference(reference), FileManager.default.fileExists(atPath: source.path) else { throw failure("音频文件不存在") }
+        guard isMediaReference(reference), FileManager.default.fileExists(atPath: source.path) else { throw failure("媒体文件不存在") }
         for album in shared where album.fileNames.contains(where: { $0 != reference && key(($0 as NSString).lastPathComponent) == key(name) }) {
-            throw failure("专辑「\(album.name)」已有同名音频，请换一个名称")
+            throw failure("专辑「\(album.name)」已有同名文件，请换一个名称")
         }
         let new = trackPath(albumID: albumID ?? shared.first?.id ?? UUID(), name: name)
         var moves = [LibraryFileCopy(source: reference, destination: new)]
         var copies: [LibraryFileCopy] = []
         let stem = key((reference as NSString).deletingPathExtension)
         let sharesSubtitles = try files(in: root).contains {
-            $0 != reference && isAudioReference($0) && key(($0 as NSString).deletingPathExtension) == stem
+            $0 != reference && isMediaReference($0) && key(($0 as NSString).deletingPathExtension) == stem
         }
         for subtitle in try sidecars(reference, root: root) {
             let change = LibraryFileCopy(source: subtitle, destination: (new as NSString).deletingPathExtension + "." + (subtitle as NSString).pathExtension.lowercased())

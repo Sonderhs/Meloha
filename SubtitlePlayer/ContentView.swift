@@ -12,18 +12,6 @@ import MediaPlayer
 import UIKit
 import UniformTypeIdentifiers
 
-struct SubtitleLine {
-    let time: TimeInterval
-    let endTime: TimeInterval?
-    let text: String
-
-    init(time: TimeInterval, endTime: TimeInterval? = nil, text: String) {
-        self.time = time
-        self.endTime = endTime
-        self.text = text
-    }
-}
-
 struct ContentView: View {
     @State private var isPlaying = false
     @State private var audioPlayer: AVAudioPlayer?
@@ -40,6 +28,7 @@ struct ContentView: View {
     @State private var showSubtitleImporter = false
     @State private var isPlayerMinimized = true
     @State private var libraryNavigationPath: [LibraryRoute] = []
+    @State private var videoToPlay: VideoPlaybackTarget?
     @State private var playbackSourceAlbumID: UUID?
     @State private var currentAudioURL: URL?
     @State private var subtitleStatus = "从音乐库选一首开始"
@@ -259,7 +248,7 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .libraryAlbumOrderChanged)) { notification in
             guard let id = notification.object as? UUID, id == playbackSourceAlbumID,
                   let album = albumStore.albums.first(where: { $0.id == id }) else { return }
-            playlist = albumStore.tracks(in: album)
+            playlist = albumStore.tracks(in: album).filter { !LibraryStorage.isVideoReference(storageReference($0)) }
             currentIndex = currentAudioURL.flatMap { playlist.firstIndex(of: $0) }
         }
         .onChange(of: isPlayerMinimized) { _, minimized in
@@ -374,6 +363,7 @@ struct ContentView: View {
 
     var body: some View {
         playbackEventContent
+        .background(videoPresentation)
         .sheet(isPresented: $showLyrics) {
             LyricsView(subtitles: subtitles, currentIndex: currentLineIndex) { time in
                 // line.time 是原始字幕时间；换算回播放时间需加上偏移。
@@ -402,6 +392,20 @@ struct ContentView: View {
             importIncomingFile(url)
         }
         .toast($toastMessage)
+    }
+
+    private var videoPresentation: some View {
+        Color.clear
+            .onReceive(NotificationCenter.default.publisher(for: VideoPlaybackTarget.requested)) { notification in
+                guard let url = notification.object as? URL, videoToPlay == nil else { return }
+                pause()
+                pipController.stopIfActive()
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+                videoToPlay = VideoPlaybackTarget(url: url)
+            }
+            .fullScreenCover(item: $videoToPlay, onDismiss: { updateNowPlayingInfo() }) { target in
+                LocalVideoView(url: target.url)
+            }
     }
 
     private var libraryView: some View {
@@ -1217,22 +1221,25 @@ struct ContentView: View {
         let center = MPRemoteCommandCenter.shared()
 
         center.playCommand.addTarget { _ in
+            guard videoToPlay == nil else { return .commandFailed }
             play()
             return .success
         }
 
         center.pauseCommand.addTarget { _ in
+            guard videoToPlay == nil else { return .commandFailed }
             pause()
             return .success
         }
 
         center.togglePlayPauseCommand.addTarget { _ in
+            guard videoToPlay == nil else { return .commandFailed }
             togglePlayback()
             return .success
         }
 
         center.changePlaybackPositionCommand.addTarget { event in
-            guard let event = event as? MPChangePlaybackPositionCommandEvent else {
+            guard videoToPlay == nil, let event = event as? MPChangePlaybackPositionCommandEvent else {
                 return .commandFailed
             }
             seek(to: event.positionTime)
@@ -1240,7 +1247,7 @@ struct ContentView: View {
         }
 
         center.nextTrackCommand.addTarget { _ in
-            guard canGoNext else {
+            guard videoToPlay == nil, canGoNext else {
                 return .noSuchContent
             }
             nextTrack()
@@ -1248,7 +1255,7 @@ struct ContentView: View {
         }
 
         center.previousTrackCommand.addTarget { _ in
-            guard canGoPrevious else {
+            guard videoToPlay == nil, canGoPrevious else {
                 return .noSuchContent
             }
             previousTrack()
@@ -1258,6 +1265,8 @@ struct ContentView: View {
 
     /// 更新锁屏 / 控制中心显示的曲目信息与播放进度。
     private func updateNowPlayingInfo() {
+        guard videoToPlay == nil else { return }
+        guard currentAudioURL != nil else { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil; return }
         var info: [String: Any] = [:]
         // 锁屏/控制中心显示内嵌标题与艺术家（读到的话），比文件名可读。
         info[MPMediaItemPropertyTitle] = playerMessage
@@ -1283,123 +1292,14 @@ struct ContentView: View {
     }
 
     private func loadSubtitle(from subtitleURL: URL) {
-        guard let subtitleText = try? String(contentsOf: subtitleURL, encoding: .utf8) else {
+        guard let parsedLines = try? MediaSubtitles.read(subtitleURL) else {
             subtitleStatus = "无法读取字幕文件"
             return
         }
-
-        let parsedLines: [SubtitleLine]
-        switch subtitleURL.pathExtension.lowercased() {
-        case "lrc":
-            // 跳过空歌词行（间奏 / 无字的时间戳），让上一句持续显示到下一句真正的歌词。
-            parsedLines = subtitleText
-                .split(whereSeparator: \.isNewline)
-                .compactMap(parseLRCLine)
-                .filter { !$0.text.isEmpty }
-        case "srt", "vtt":
-            parsedLines = parseCueSubtitle(subtitleText)
-        default:
-            subtitleStatus = "暂不支持的字幕格式：.\(subtitleURL.pathExtension)"
-            return
-        }
-
-        subtitles = parsedLines.sorted { $0.time < $1.time }
+        subtitles = parsedLines
         subtitleStatus = subtitles.isEmpty
             ? "未能从 \(subtitleURL.lastPathComponent) 解析出字幕"
             : "已加载 \(subtitleURL.lastPathComponent)"
-    }
-
-    private func parseLRCLine(_ line: Substring) -> SubtitleLine? {
-        guard let closingBracket = line.firstIndex(of: "]"), line.first == "[" else {
-            return nil
-        }
-
-        let timestamp = line[line.index(after: line.startIndex)..<closingBracket]
-        let timeParts = timestamp.split(separator: ":", maxSplits: 1)
-        guard timeParts.count == 2,
-              let minutes = Double(timeParts[0]),
-              let seconds = Double(timeParts[1]) else {
-            return nil
-        }
-
-        let textStart = line.index(after: closingBracket)
-        let text = line[textStart...].trimmingCharacters(in: .whitespaces)
-        return SubtitleLine(time: minutes * 60 + seconds, text: text)
-    }
-
-    /// 解析基于 cue 块的字幕（SRT 与 WebVTT 结构几乎一致）。
-    /// 按空行切分字幕块，每块定位含 "-->" 的时间行，其余行合并为字幕文本。
-    /// 自动跳过 VTT 的 "WEBVTT" 头、"NOTE"/"STYLE"/"REGION" 等无时间行的块，
-    /// 以及 SRT/VTT 的序号或 cue 标识行。
-    private func parseCueSubtitle(_ text: String) -> [SubtitleLine] {
-        // 统一换行符，按空行切分字幕块。
-        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        let blocks = normalized.components(separatedBy: "\n\n")
-
-        var lines: [SubtitleLine] = []
-        for block in blocks {
-            let rawLines = block.split(separator: "\n", omittingEmptySubsequences: true)
-            guard let timingIndex = rawLines.firstIndex(where: { $0.contains("-->") }) else {
-                continue
-            }
-
-            let timingLine = rawLines[timingIndex]
-            let timingParts = timingLine.components(separatedBy: "-->")
-            guard timingParts.count == 2,
-                  let start = parseCueTimestamp(timingParts[0]) else {
-                continue
-            }
-            let end = parseCueTimestamp(timingParts[1])
-
-            let textLines = rawLines[rawLines.index(after: timingIndex)...]
-                .map { stripTags(String($0)).trimmingCharacters(in: .whitespaces) }
-            let text = textLines.joined(separator: "\n")
-            guard !text.isEmpty else {
-                continue
-            }
-
-            lines.append(SubtitleLine(time: start, endTime: end, text: text))
-        }
-
-        return lines
-    }
-
-    /// 解析 cue 时间戳，兼容：
-    /// - SRT "HH:MM:SS,mmm"（逗号毫秒）
-    /// - VTT "HH:MM:SS.mmm" 或省略小时的 "MM:SS.mmm"
-    /// - VTT 结束时间后附带的 cue 设置（如 "align:start position:10%"）——只取首个 token。
-    private func parseCueTimestamp(_ raw: String) -> TimeInterval? {
-        let token = raw
-            .trimmingCharacters(in: .whitespaces)
-            .split(separator: " ")
-            .first
-            .map(String.init) ?? ""
-        let normalized = token.replacingOccurrences(of: ",", with: ".")
-        let parts = normalized.split(separator: ":")
-
-        switch parts.count {
-        case 3:
-            guard let hours = Double(parts[0]),
-                  let minutes = Double(parts[1]),
-                  let seconds = Double(parts[2]) else {
-                return nil
-            }
-            return hours * 3600 + minutes * 60 + seconds
-        case 2:
-            guard let minutes = Double(parts[0]),
-                  let seconds = Double(parts[1]) else {
-                return nil
-            }
-            return minutes * 60 + seconds
-        default:
-            return nil
-        }
-    }
-
-    /// 去除字幕文本中的标签，如 SRT 的 `<i>`/`<b>` 与 VTT 的 `<v Roger>`/`<c.class>`。
-    private func stripTags(_ text: String) -> String {
-        text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
     }
 
     private func timeText(_ time: TimeInterval) -> String {
@@ -1477,6 +1377,7 @@ struct AudioFilesView: View {
 
                 switch libraryMode {
                 case .albums:
+                    SigningReminderView()
                     albumsList
                 case .tools:
                     toolsList
@@ -1854,6 +1755,13 @@ struct AudioFilesView: View {
                     AudioDownloadView()
                 } label: {
                     Label("从链接下载", systemImage: "arrow.down.circle")
+                }
+                .listRowBackground(rowBackground)
+
+                NavigationLink {
+                    YouTubeDownloadView(albumStore: albumStore)
+                } label: {
+                    Label("从 YouTube 下载", systemImage: "play.rectangle")
                 }
                 .listRowBackground(rowBackground)
             }

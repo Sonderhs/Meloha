@@ -24,6 +24,7 @@ final class DocumentsIndex: ObservableObject {
     private var fileNames: Set<String> = []
     /// 其中的音频文件名（供 documentsAudioURLs 直接用，省一次过滤）。
     private(set) var audioFileNames: [String] = []
+    private(set) var videoFileNames: [String] = []
     /// 音频基名 → 字幕格式（大写，如 "LRC"）。按 srt → vtt → lrc 优先级取第一个存在的。
     private var subtitleFormatByBase: [String: String] = [:]
     private var albumNamesByFile: [String: String] = [:]
@@ -43,9 +44,8 @@ final class DocumentsIndex: ObservableObject {
         guard let documentsURL else { return }
         let names = (try? LibraryStorage.files(in: documentsURL)) ?? []
         fileNames = Set(names)
-        audioFileNames = names.filter {
-            LibraryStorage.isAudioReference($0)
-        }
+        audioFileNames = names.filter(LibraryStorage.isAudioReference)
+        videoFileNames = names.filter(LibraryStorage.isVideoReference)
 
         // 预先算好每个音频基名对应的字幕格式，省得每行现查。
         var formats: [String: String] = [:]
@@ -86,6 +86,8 @@ final class DocumentsIndex: ObservableObject {
     }
 
     func albumNames(for url: URL) -> String? { albumNamesByFile[storageReference(url)] }
+
+    func notifyMetadataChanged() { revision += 1 }
 
     /// 给非主 actor 的调用点用（全局导入函数等）。已在主线程则立即刷新，否则排到主线程。
     nonisolated static func refreshSoon() {
