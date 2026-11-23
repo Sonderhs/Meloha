@@ -1764,6 +1764,13 @@ struct AudioFilesView: View {
                     Label("从 YouTube 下载", systemImage: "play.rectangle")
                 }
                 .listRowBackground(rowBackground)
+
+                NavigationLink {
+                    Y2DownDownloadView(albumStore: albumStore)
+                } label: {
+                    Label("Y2Down 网页下载", systemImage: "safari")
+                }
+                .listRowBackground(rowBackground)
             }
         }
         .scrollContentBackground(backgroundStore.image == nil ? .automatic : .hidden)
