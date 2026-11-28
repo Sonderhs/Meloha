@@ -5,6 +5,7 @@ import Foundation
 /// 备份里随文件一起保存的 UserDefaults 项。
 nonisolated struct BackupSettings: Codable {
     var allowMixWithOthers: Bool?
+    var playbackVolumeBoostDB: Double?
     var appTheme: String?
     var backgroundOpacity: Double?
     var playbackRate: Double?
@@ -20,6 +21,7 @@ nonisolated struct BackupSettings: Codable {
         let d = UserDefaults.standard
         return BackupSettings(
             allowMixWithOthers: d.object(forKey: "allowMixWithOthers") as? Bool,
+            playbackVolumeBoostDB: d.object(forKey: "playbackVolumeBoostDB") as? Double,
             appTheme: d.string(forKey: "appTheme"),
             backgroundOpacity: d.object(forKey: "backgroundOpacity") as? Double,
             playbackRate: d.object(forKey: "playbackRate") as? Double,
@@ -36,6 +38,7 @@ nonisolated struct BackupSettings: Codable {
     func apply() {
         let d = UserDefaults.standard
         if let v = allowMixWithOthers { d.set(v, forKey: "allowMixWithOthers") }
+        if let v = playbackVolumeBoostDB { d.set(v, forKey: "playbackVolumeBoostDB") }
         if let v = appTheme { d.set(v, forKey: "appTheme") }
         if let v = backgroundOpacity { d.set(v, forKey: "backgroundOpacity") }
         if let v = playbackRate { d.set(v, forKey: "playbackRate") }

@@ -14,7 +14,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var isPlaying = false
-    @State private var audioPlayer: AVAudioPlayer?
+    @State private var audioPlayer: LocalAudioPlayback?
     @State private var playerMessage = "还没有选择音频"
     /// 下滑收起播放器时的实时位移（0 表示未拖动）。
     @State private var dragOffset: CGFloat = 0
@@ -49,6 +49,7 @@ struct ContentView: View {
     @State private var showChat = false
     /// 允许与其他应用同时播放（混音）。
     @AppStorage("allowMixWithOthers") private var mixWithOthers = false
+    @AppStorage(PlaybackVolumeBoost.key) private var volumeBoostDB = 0.0
     /// 外观主题（跟随系统 / 浅色 / 深色）。
     @AppStorage("appTheme") private var appTheme: AppTheme = .system
     /// 背景图不透明度（0~1，越小越透）。
@@ -317,6 +318,27 @@ struct ContentView: View {
         .onChange(of: mixWithOthers) { _, _ in
             configureAudioSession()
         }
+        .onChange(of: volumeBoostDB) { _, newGain in
+            guard let audioPlayer else { return }
+            audioPlayer.setGain(newGain)
+            if audioPlayer.boostUnavailable { toastMessage = "音量增强不可用，已使用原音量" }
+        }
+        .onReceive(audioSessionEvents) { notification in
+            guard audioPlayer?.isBoosted == true else { return }
+            let interruption = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let routeChange = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+            guard interruption == AVAudioSession.InterruptionType.began.rawValue
+                    || routeChange == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue else { return }
+            pause()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: LocalAudioPlayback.enhancedPlaybackDidFinish)) { notification in
+            guard audioPlayer?.didFinishBoostedPlayback(notification) == true else { return }
+            currentTime = duration
+            isPlaying = false
+            updateNowPlayingInfo()
+            pipController.setPlaybackState(playing: false)
+            handleTrackFinished()
+        }
         .onChange(of: playbackRate) { _, newRate in
             if isPlaying {
                 audioPlayer?.rate = Float(newRate)
@@ -339,6 +361,7 @@ struct ContentView: View {
             // 暂停时进度不会变，写它只会白白触发重绘。
             if playing {
                 currentTime = audioPlayer.currentTime
+                lastPlayingTime = currentTime
             }
 
             // 播放状态变化（如自然播完）时同步锁屏信息。
@@ -347,18 +370,21 @@ struct ContentView: View {
                 updateNowPlayingInfo()
                 pipController.setPlaybackState(playing: playing)
 
-                // 自然播放结束：上一拍还在播、且已接近片尾 → 按播放模式连播。
-                // （AVAudioPlayer 播完会把 currentTime 重置，故用上一拍的进度判断。）
-                if !playing, duration > 0, lastPlayingTime >= duration - 0.9 {
+                // 原播放器播完会重置进度，沿用上一拍的片尾判断。
+                if !playing, !audioPlayer.isBoosted, duration > 0, lastPlayingTime >= duration - 0.9 {
                     handleTrackFinished()
                 }
             }
-
-            if playing {
-                lastPlayingTime = audioPlayer.currentTime
-            }
         }
         .preferredColorScheme(appTheme.colorScheme)
+    }
+
+    private var audioSessionEvents: AnyPublisher<Notification, Never> {
+        let notifications = NotificationCenter.default
+        return notifications.publisher(for: AVAudioSession.interruptionNotification)
+            .merge(with: notifications.publisher(for: AVAudioSession.routeChangeNotification))
+            .receive(on: RunLoop.main)
+            .eraseToAnyPublisher()
     }
 
     var body: some View {
@@ -897,11 +923,11 @@ struct ContentView: View {
     private func loadAudio(from url: URL) {
         do {
             audioPlayer?.stop()
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.enableRate = true
-            audioPlayer?.prepareToPlay()
-            duration = audioPlayer?.duration ?? 0
+            let player = try LocalAudioPlayback(url: url, gainDB: volumeBoostDB)
+            audioPlayer = player
+            duration = player.duration
             currentTime = 0
+            lastPlayingTime = 0
             isPlaying = false
             currentAudioURL = url
             // 先用文件名兜底；内嵌标题读到后会在 loadArtwork 里替换掉。
@@ -1077,15 +1103,20 @@ struct ContentView: View {
         if audioPlayer.currentTime >= audioPlayer.duration {
             seek(to: 0)
         }
-        audioPlayer.play()
         audioPlayer.rate = Float(playbackRate)
-        isPlaying = true
+        lastPlayingTime = audioPlayer.currentTime
+        audioPlayer.play()
+        if audioPlayer.boostUnavailable { toastMessage = "音量增强不可用，已使用原音量" }
+        isPlaying = audioPlayer.isPlaying
         updateNowPlayingInfo()
-        pipController.setPlaybackState(playing: true)
+        pipController.setPlaybackState(playing: isPlaying)
     }
 
     private func pause() {
         audioPlayer?.pause()
+        if let audioPlayer, audioPlayer.isBoosted {
+            currentTime = audioPlayer.currentTime
+        }
         isPlaying = false
         updateNowPlayingInfo()
         pipController.setPlaybackState(playing: false)
@@ -1191,8 +1222,13 @@ struct ContentView: View {
 
     private func seek(to time: TimeInterval) {
         let newTime = min(max(time, 0), duration)
+        let wasBoosted = audioPlayer?.isBoosted == true
         audioPlayer?.currentTime = newTime
+        if wasBoosted, audioPlayer?.boostUnavailable == true {
+            toastMessage = "音量增强不可用，已使用原音量"
+        }
         currentTime = newTime
+        lastPlayingTime = newTime
         updateNowPlayingInfo()
     }
 

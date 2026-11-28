@@ -243,6 +243,7 @@ struct SettingsView: View {
     @ObservedObject var albumStore: AlbumStore
     @AppStorage("appTheme") private var appTheme: AppTheme = .system
     @AppStorage("allowMixWithOthers") private var mixWithOthers = false
+    @AppStorage(PlaybackVolumeBoost.key) private var volumeBoostDB = 0.0
     @AppStorage("backgroundOpacity") private var backgroundOpacity: Double = 0.6
     @AppStorage("subtitleFontSize") private var subtitleFontSize: Double = 17
     @AppStorage("subtitleColor") private var subtitleColor: SubtitleColorChoice = .standard
@@ -357,11 +358,7 @@ struct SettingsView: View {
                     Text("自定义 AI 的身份、语气与风格（作为系统提示）。留空则使用默认助手设定。修改会在下一条消息生效，正在进行的对话会重新开始。")
                 }
 
-                Section {
-                    Toggle("允许与其他应用同时播放", isOn: $mixWithOthers)
-                } footer: {
-                    Text("开启后，本应用的声音会与其他应用混合播放，而不会中断它们。注意：混音模式下，锁屏 / 控制中心的播放控制可能不可用。")
-                }
+                playbackSection
 
                 backupSection
             }
@@ -429,6 +426,24 @@ struct SettingsView: View {
             } message: {
                 Text(backupMessage ?? "")
             }
+        }
+    }
+
+    private var playbackSection: some View {
+        let gain = PlaybackVolumeBoost.bounded(volumeBoostDB)
+        let value = gain == 0 ? "关闭" : "+\(Int(gain.rounded())) dB"
+        return Section {
+            Toggle("允许与其他应用同时播放", isOn: $mixWithOthers)
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent("音频音量增强", value: value)
+                    .accessibilityHidden(true)
+                Slider(value: Binding(get: { gain }, set: { volumeBoostDB = $0 }),
+                       in: 0...PlaybackVolumeBoost.maximumDB, step: 1)
+                    .accessibilityLabel("音频音量增强")
+                    .accessibilityValue(Text(value))
+            }
+        } footer: {
+            Text("混播时，可先用 iPhone 音量键把其他 App 调到合适的响度，再提高 Meloha 本地音频的音量。0 dB 为原音量。混播时，锁屏和控制中心的播放控制可能不可用。")
         }
     }
 
